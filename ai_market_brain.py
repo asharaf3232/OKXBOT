@@ -127,3 +127,34 @@ async def get_market_regime(exchange):
     except Exception as e:
         logger.error(f"Market Regime Analysis failed: {e}")
         return "UNKNOWN"
+        async def get_market_mood(bot_data):
+    """
+    Determines the overall market mood based on technical indicators like BTC trend and Fear & Greed Index.
+    """
+    settings = bot_data.settings
+    btc_mood_text = "الفلتر معطل"
+
+    # 1. BTC Trend Filter
+    if settings.get('btc_trend_filter_enabled', True):
+        try:
+            htf_period = settings['trend_filters']['htf_period']
+            ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['sma'] = ta.sma(df['close'], length=htf_period)
+            is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
+            btc_mood_text = "صاعد ✅" if is_btc_bullish else "هابط ❌"
+            if not is_btc_bullish:
+                return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
+        except Exception as e:
+            return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
+
+    # 2. Fear & Greed Filter
+    if settings.get('market_mood_filter_enabled', True):
+        # We need to re-import get_fear_and_greed_index if it's in the same file
+        # or make sure it is available in the scope
+        fng = await get_fear_and_greed_index()
+        if fng is not None and fng < settings['fear_and_greed_threshold']:
+            return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
+    
+    # 3. If all checks pass
+    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
