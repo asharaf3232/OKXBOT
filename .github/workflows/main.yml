@@ -1,0 +1,36 @@
+# اسم الـ Workflow
+name: Deploy Bot to VPS
+
+# المشغل: يعمل تلقائيًا عند أي تحديث لفرع main
+on:
+  push:
+    branches:
+      - main
+  # يسمح لك بتشغيله يدويًا من واجهة GitHub Actions
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: SSH and Deploy
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.VPS_SSH_HOST }}
+        username: ${{ secrets.VPS_SSH_USERNAME }}
+        key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        script: |
+          # اذهب إلى مجلد البوت (غيّر المسار إذا لزم الأمر)
+          cd /root/bots/OKXBOT
+
+          # اسحب آخر التحديثات من فرع main
+          git pull origin main
+
+          # فعّل البيئة الافتراضية
+          source venv/bin/activate
+
+          # قم بتثبيت أي مكتبات جديدة أو محدثة
+          pip install -r requirements.txt
+
+          # أعد تشغيل البوت باستخدام PM2 ليعمل بالتحديثات الجديدة
+          pm2 reload OKX_Maestro_Bot
