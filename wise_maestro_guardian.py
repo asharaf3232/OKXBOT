@@ -1,17 +1,7 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🛡️ Wise Maestro Guardian - v2.1 (Hardened Edition) 🛡️ ---
+# --- 🛡️ Wise Maestro Guardian - v2.2 (Final Corrected) 🛡️ ---
 # =======================================================================================
-# --- سجل التغييرات للإصدار المُصَلَّب ---
-#   ✅ [إصلاح قاتل] إضافة دالة مساعدة (_safe_get_indicator) لجلب المؤشرات بأمان.
-#   ✅ [إصلاح قاتل] تحديث جميع استدعاءات المؤشرات (ADX) لاستخدام الدالة الآمنة.
-#   ✅ [إصلاح قاتل] إضافة كتل try-except حول العمليات الحساسة لمنع الانهيار.
-#   ✅ [الترقية النهائية] دمج "بروتوكول الإغلاق المُصَلَّب" من بوت Binance V6.6.
-#   ✅ [الترقية النهائية] دمج "المشرف الذكي" لمعالجة الصفقات العالقة والمعلقة.
-#   ✅ [الترقية النهائية] إضافة تقارير إغلاق تحليلية مفصلة (كفاءة الخروج، مدة الصفقة).
-#   ✅ [الحفاظ] الحفاظ على بنية العقل الموحد لاستقبال البيانات من أي بوت (Binance/OKX).
-# =======================================================================================
-
 import logging
 import asyncio
 import aiosqlite
@@ -22,16 +12,18 @@ from telegram.ext import Application
 from collections import defaultdict
 from datetime import datetime, timedelta
 import json
+from zoneinfo import ZoneInfo # <<< تم إضافة هذا السطر
 
 # --- هذه الاستيرادات ضرورية للمنطق الداخلي ---
-from _settings_config import PORTFOLIO_RISK_RULES, SECTOR_MAP, STRATEGY_NAMES_AR, SCANNERS, TIMEFRAME
-from strategy_scanners import find_col
+from settings_config import PORTFOLIO_RISK_RULES, SECTOR_MAP, STRATEGY_NAMES_AR, TIMEFRAME
+from strategy_scanners import find_col, SCANNERS
 
 logger = logging.getLogger(__name__)
 
-# سيتم تعيين هذه المتغيرات في الملف الرئيسي (binance_maestro.py أو okx_maestro.py)
+# سيتم تعيين هذه المتغيرات في الملف الرئيسي
 DB_FILE = None 
 bot_data = None 
+EGYPT_TZ = ZoneInfo("Africa/Cairo") # <<< تم إضافة هذا السطر
 
 class TradeGuardian:
     def __init__(self, exchange: ccxt.Exchange, application: Application, bot_state_object: object, db_file: str):
@@ -50,23 +42,16 @@ class TradeGuardian:
             except Exception as e:
                 logger.error(f"Telegram Send Error: {e}")
 
-    # --- [إصلاح قاتل] دالة جديدة لجلب المؤشرات بأمان ---
     def _safe_get_indicator(self, df: pd.DataFrame, indicator_prefix: str, default_value=0.0, index=-1):
-        """
-        تجلب القيمة الأخيرة لمؤشر فني بأمان من DataFrame.
-        تُرجع قيمة افتراضية إذا لم يتم العثور على عمود المؤشر أو حدث خطأ.
-        """
         try:
             col_name = find_col(df.columns, indicator_prefix)
             if col_name and not df[col_name].dropna().empty:
                 return df[col_name].iloc[index]
-            # logger.warning(f"Safe get: Indicator column '{indicator_prefix}' not found or is empty.")
             return default_value
         except (IndexError, KeyError) as e:
             logger.error(f"Safe get: Error accessing indicator '{indicator_prefix}': {e}")
             return default_value
 
-    # --- دالة مساعدة من بوت باينانس لتنسيق مدة الصفقة ---
     def _format_duration(self, duration_delta: timedelta) -> str:
         seconds = duration_delta.total_seconds()
         if seconds < 60: return "أقل من دقيقة"
@@ -81,13 +66,7 @@ class TradeGuardian:
         if minutes > 0: parts.append(f"{int(minutes)} دقيقة")
         return " و ".join(parts)
 
-    # =======================================================================================
-    # --- A. منطق الرجل الحكيم (Wise Man - Tactical Review) ---
-    # =======================================================================================
     async def review_open_trades(self, context: object = None):
-        """
-        الرجل الحكيم: يراجع الصفقات المفتوحة لاتخاذ قرارات تكتيكية (خروج مبكر/تمديد هدف).
-        """
         if not bot_data.settings.get('adaptive_intelligence_enabled', True): return
         logger.info("🧠 Wise Man: Starting periodic review of open trades...")
         
@@ -99,11 +78,10 @@ class TradeGuardian:
             try:
                 btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=30)
                 btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                # --- [إصلاح قاتل] حساب زخم البيتكوين بأمان ---
                 btc_momentum = ta.mom(btc_df['close'], length=10).iloc[-1] if not btc_df.empty else 0
             except Exception as e:
                 logger.error(f"Wise Man: Could not fetch BTC data for comparison: {e}")
-                btc_momentum = 0 # قيمة محايدة
+                btc_momentum = 0
 
             for trade_data in active_trades:
                 trade = dict(trade_data)
@@ -111,18 +89,17 @@ class TradeGuardian:
                 
                 try:
                     ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
-                    if not ohlcv: continue # تخطي إذا لم تكن هناك بيانات
+                    if not ohlcv: continue
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     current_price = df['close'].iloc[-1]
                     
                     df['ema_fast'] = ta.ema(df['close'], length=10)
                     df['ema_slow'] = ta.ema(df['close'], length=30)
                     
-                    # --- [إصلاح قاتل] التحقق من الضعف بأمان ---
                     try:
                         is_weak = current_price < df['ema_fast'].iloc[-1] and current_price < df['ema_slow'].iloc[-1]
                     except IndexError:
-                        is_weak = False # افتراض عدم وجود ضعف إذا كانت البيانات غير كافية
+                        is_weak = False
 
                     if is_weak and btc_momentum < 0 and current_price < trade['entry_price']:
                         logger.warning(f"Wise Man recommends early exit for {symbol} (Weakness + BTC down).")
@@ -132,7 +109,6 @@ class TradeGuardian:
 
                     current_profit_pct = (current_price / trade['entry_price'] - 1) * 100
                     df.ta.adx(append=True)
-                    # --- [إصلاح قاتل] استخدام الدالة الآمنة لجلب ADX ---
                     current_adx = self._safe_get_indicator(df, "ADX_14", default_value=20)
                     is_strong = current_profit_pct > 3.0 and current_adx > 30
 
@@ -148,13 +124,7 @@ class TradeGuardian:
                 
                 await asyncio.sleep(1)
 
-    # =======================================================================================
-    # --- B. منطق المراجع الذكي (Intelligent Reviewer - Signal Validity Check) ---
-    # =======================================================================================
     async def intelligent_reviewer_job(self, context: object = None):
-        """
-        المراجع الذكي: يعيد تشغيل تحليل الإشارة الأصلية لضمان أن الصفقة لم تفقد مبررها الفني.
-        """
         if not bot_data.settings.get('intelligent_reviewer_enabled', True): return
         logger.info("🧠 Intelligent Reviewer: Reviewing active trades for signal validity...")
         
@@ -172,29 +142,15 @@ class TradeGuardian:
 
             try:
                 ohlcv = await self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
-                if not ohlcv or len(ohlcv) < 50: continue # تخطي إذا كانت البيانات غير كافية
+                if not ohlcv or len(ohlcv) < 50: continue
                 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index()
-
-                df.ta.adx(append=True)
-                # --- [إصلاح قاتل] استخدام الدالة الآمنة لجلب ADX ---
-                adx_value = self._safe_get_indicator(df, "ADX_", default_value=20, index=-2)
-
-                # --- [إصلاح قاتل] حساب الحجم النسبي بأمان ---
-                try:
-                    df['volume_sma'] = ta.sma(df['volume'], length=20)
-                    # التحقق من أن القيمة ليست صفرًا قبل القسمة
-                    volume_sma_val = df['volume_sma'].iloc[-2]
-                    rvol = (df['volume'].iloc[-2] / volume_sma_val) if volume_sma_val > 0 else 1.0
-                except (IndexError, ZeroDivisionError):
-                    rvol = 1.0 # قيمة محايدة
-
+                
                 analyzer_func = SCANNERS[primary_reason]
                 params = bot_data.settings.get(primary_reason, {})
                 
-                func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
+                # We pass dummy values for rvol and adx_value as this function doesn't use them
+                func_args = {'df': df.copy(), 'params': params, 'rvol': 1.0, 'adx_value': 25}
                 if primary_reason in ['support_rebound']:
                     func_args.update({'exchange': self.exchange, 'symbol': symbol})
                 
@@ -209,13 +165,7 @@ class TradeGuardian:
         
         logger.info("🧠 Intelligent Reviewer: Review cycle complete.")
 
-    # =======================================================================================
-    # --- C. منطق إدارة الصفقة في الوقت الحقيقي (Ticker Handler) ---
-    # =======================================================================================
     async def handle_ticker_update(self, standard_ticker: dict):
-        """
-        [العقل الموحد] يتم استدعاؤها مع كل تحديث للسعر بتنسيق موحد.
-        """
         async with bot_data.trade_management_lock:
             symbol = standard_ticker['symbol']
             current_price = standard_ticker['price']
@@ -278,19 +228,15 @@ class TradeGuardian:
             except Exception as e: 
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
                 
-    # =======================================================================================
-    # --- D. [الترقية النهائية] بروتوكول الإغلاق المُصَلَّب (من بوت باينانس) ---
-    # =======================================================================================
     async def _close_trade(self, trade: dict, reason: str, close_price: float):
         symbol, trade_id = trade['symbol'], trade['id']
-        bot = self.application.bot
 
         try:
             async with aiosqlite.connect(DB_FILE) as conn:
                 cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status IN ('active', 'retry_exit', 'force_exit')", (trade_id,))
                 await conn.commit()
                 if cursor.rowcount == 0:
-                    logger.warning(f"Closure for trade #{trade_id} ignored; it's not in an closable state or another process is handling it.")
+                    logger.warning(f"Closure for trade #{trade_id} ignored; not in a closable state.")
                     return
         except Exception as e:
             logger.error(f"CRITICAL DB ACTION FAILED for trade #{trade_id}: {e}")
@@ -300,29 +246,23 @@ class TradeGuardian:
         
         try:
             base_currency = symbol.split('/')[0]
-            logger.info(f"[{symbol}] Asking exchange for TRUE current balance...")
             balance = await bot_data.exchange.fetch_balance()
             available_quantity = balance.get(base_currency, {}).get('free', 0.0)
             
             if available_quantity <= 0.00000001:
-                logger.warning(f"[{symbol}] No available balance found on exchange. Cleaning up trade #{trade_id} as if closed (zero PNL).")
+                logger.warning(f"[{symbol}] No available balance. Cleaning up trade #{trade_id}.")
                 async with aiosqlite.connect(DB_FILE) as conn:
                     await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (f"{reason} (No Balance)", close_price, 0.0, trade_id))
                     await conn.commit()
-                if hasattr(bot_data, 'websocket_manager'): await bot_data.websocket_manager.sync_subscriptions()
+                if hasattr(bot_data, 'public_ws'): await bot_data.public_ws.unsubscribe([symbol])
                 return
 
             market = bot_data.exchange.market(symbol)
             quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, available_quantity))
-            logger.info(f"[{symbol}] Final formatted quantity to sell based on actual balance: {quantity_to_sell}")
-
-            min_qty = float(market.get('limits', {}).get('amount', {}).get('min', '0'))
-            min_notional = float(market.get('limits', {}).get('notional', {}).get('min', '0'))
             
+            min_qty = float(market.get('limits', {}).get('amount', {}).get('min', '0'))
             if min_qty > 0 and quantity_to_sell < min_qty:
-                raise ccxt.InvalidOrder(f"Final quantity {quantity_to_sell} is below the exchange's minimum amount of {min_qty}.")
-            if min_notional > 0 and (quantity_to_sell * close_price) < min_notional:
-                raise ccxt.InvalidOrder(f"Total trade value is below minimum notional. Value: {quantity_to_sell * close_price}, Min Required: {min_notional}")
+                raise ccxt.InvalidOrder(f"Qty {quantity_to_sell} < min {min_qty}.")
 
             params = {'tdMode': 'cash'} if self.exchange.id == 'okx' else {}
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell, params=params)
@@ -335,10 +275,7 @@ class TradeGuardian:
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
                 await conn.commit()
             
-            trade_entry_time = datetime.fromisoformat(trade['timestamp'])
-            # EGYPT_TZ must be defined in your main bot file, e.g., from pytz import timezone; EGYPT_TZ = timezone('Africa/Cairo')
-            duration_delta = datetime.now() - trade_entry_time.replace(tzinfo=None) # Naive datetime for subtraction
-            trade_duration = self._format_duration(duration_delta)
+            trade_duration = self._format_duration(datetime.now(EGYPT_TZ) - datetime.fromisoformat(trade['timestamp']))
             
             exit_efficiency_str = ""
             if is_profit and trade.get('highest_price', 0) > trade['entry_price']:
@@ -368,37 +305,32 @@ class TradeGuardian:
             final_message = f"**{title}**\n\n{message_body}"
             await self.safe_send_message(final_message)
 
-            if hasattr(bot_data, 'smart_brain') and hasattr(bot_data.smart_brain, 'add_trade_to_journal'):
+            if hasattr(bot_data, 'smart_brain'):
                 final_trade_details = dict(trade)
                 final_trade_details.update({'status': reason, 'close_price': close_price, 'pnl_usdt': pnl})
                 await bot_data.smart_brain.add_trade_to_journal(final_trade_details)
 
         except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as e:
-             logger.warning(f"Closure for #{trade_id} failed with an expected trade rule error, moving to incubator: {e}")
+             logger.warning(f"Closure for #{trade_id} failed with trade rule error, moving to incubator: {e}")
              async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
                 await conn.commit()
         except Exception as e:
-            logger.critical(f"CRITICAL: ULTIMATE closure for #{trade_id} failed unexpectedly. MOVING TO INCUBATOR: {e}", exc_info=True)
+            logger.critical(f"CRITICAL: ULTIMATE closure for #{trade_id} failed. MOVING TO INCUBATOR: {e}", exc_info=True)
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
                 await conn.commit()
             await self.safe_send_message(f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
         finally:
-            if hasattr(bot_data, 'websocket_manager') and hasattr(bot_data.websocket_manager, 'sync_subscriptions'): await bot_data.websocket_manager.sync_subscriptions()
-            if hasattr(bot_data, 'public_ws') and hasattr(bot_data.public_ws, 'unsubscribe'): await bot_data.public_ws.unsubscribe([symbol])
+            if hasattr(bot_data, 'public_ws'): await bot_data.public_ws.unsubscribe([symbol])
 
-    # =======================================================================================
-    # --- E. [الترقية النهائية] المشرف الذكي (من بوت باينانس) ---
-    # =======================================================================================
     async def the_supervisor_job(self, context: object = None):
         logger.info("🕵️ Supervisor (Smart Edition): Running audit and recovery checks...")
         
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             
-            # Note: EGYPT_TZ must be defined in your main bot file.
-            stuck_threshold = (datetime.now() - timedelta(minutes=2)).isoformat()
+            stuck_threshold = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
             stuck_pending = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp < ?", (stuck_threshold,))).fetchall()
 
             if stuck_pending:
@@ -408,8 +340,9 @@ class TradeGuardian:
                     try:
                         order_status = await self.exchange.fetch_order(trade['order_id'], trade['symbol'])
                         if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
-                            if 'activate_trade' in dir(bot_data):
-                                await bot_data.activate_trade(trade['order_id'], trade['symbol'])
+                            # The main bot file should have activate_trade
+                            if hasattr(bot_data.application.bot, 'activate_trade'):
+                                await bot_data.application.bot.activate_trade(trade['order_id'], trade['symbol'])
                         elif order_status['status'] in ['canceled', 'expired']:
                             await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
                         await asyncio.sleep(1)
@@ -428,9 +361,6 @@ class TradeGuardian:
         
         logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 
-    # =======================================================================================
-    # --- F. مراجعة مخاطر المحفظة (Portfolio Risk Review) ---
-    # =======================================================================================
     async def review_portfolio_risk(self, context: object = None):
         logger.info("🧠 Wise Man: Starting portfolio risk review...")
         try:
