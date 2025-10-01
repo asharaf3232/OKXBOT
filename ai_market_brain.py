@@ -2,7 +2,7 @@
 import logging
 import asyncio
 import json
-import time # <<< تم إضافة هذا السطر
+import time 
 import httpx
 import pandas as pd
 import pandas_ta as ta
