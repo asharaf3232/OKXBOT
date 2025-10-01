@@ -1,7 +1,7 @@
-ccxt[async]
+ccxt
 pandas
-pandas_ta
-python-telegram-bot[ext, job-queue]
+pandas-ta==0.3.14b0
+python-telegram-bot
 aiosqlite
 httpx
 feedparser
