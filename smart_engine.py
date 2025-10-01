@@ -18,7 +18,7 @@ class EvolutionaryEngine:
         self.exchange = exchange
         self.application = application
         self.DB_FILE = db_file
-        self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
+        self.telegram_chat_id = application.bot_data.TELEGRAM_CHAT_ID
         logger.info("🧬 Advanced Evolutionary Engine Initialized (with What-If Analysis).")
         asyncio.create_task(self._init_journal_table())
 
