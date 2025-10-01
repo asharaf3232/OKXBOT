@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Wise Maestro Bot - Final Fusion v2.0 🚀 ---
+# --- 🚀 Wise Maestro Bot - OKX Edition v2.0 🚀 ---
 # =======================================================================================
 import os
 import logging
@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 import websockets
 import websockets.exceptions
 import redis.asyncio as redis
+import hmac
+import base64
 
 # استيراد الوحدات المنفصلة
 from _settings_config import *
@@ -36,17 +38,18 @@ load_dotenv()
 # --- جلب المتغيرات ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
+OKX_API_KEY = os.getenv('OKX_API_KEY')
+OKX_API_SECRET = os.getenv('OKX_API_SECRET')
+OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE')
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 
 # --- إعدادات أساسية ---
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
-DB_FILE = 'wise_maestro_binance.db'
-SETTINGS_FILE = 'wise_maestro_binance_settings.json'
+DB_FILE = 'wise_maestro_okx.db'
+SETTINGS_FILE = 'wise_maestro_okx_settings.json'
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("BINANCE_MAESTRO")
+logger = logging.getLogger("OKX_MAESTRO")
 
 # --- الحالة العامة للبوت ---
 class BotState:
@@ -61,10 +64,9 @@ class BotState:
         self.last_scan_info = {}
         self.all_markets = []
         self.last_markets_fetch = 0
-        self.websocket_manager = None
-        self.strategy_performance = {}
-        self.pending_strategy_proposal = {}
-        self.last_deep_analysis_time = defaultdict(float)
+        self.public_ws = None
+        self.private_ws = None
+        self.trade_guardian = None
         self.guardian = None
         self.smart_brain = None
         self.TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID
@@ -75,93 +77,114 @@ bot_data = BotState()
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 
-# --- WebSocket Manager ---
-class WebSocketManager:
-    def __init__(self, exchange, application):
-        self.exchange = exchange
-        self.application = application
-        self.listen_key = None
-        self.public_subscriptions = set()
-        self.ws = None
-        self.is_running = False
-        self.keep_alive_task = None
-
-    async def _get_listen_key(self):
-        try:
-            self.listen_key = (await self.exchange.publicPostUserDataStream())['listenKey']
-            logger.info("WebSocket Manager: New listen key obtained.")
-            return True
-        except Exception as e:
-            logger.error(f"WebSocket Manager: Failed to get listen key: {e}")
-            self.listen_key = None
-            return False
-
-    async def _keep_alive_listen_key(self):
-        while self.is_running:
-            await asyncio.sleep(1800) # 30 minutes
-            if self.listen_key:
-                try:
-                    await self.exchange.publicPutUserDataStream({'listenKey': self.listen_key})
-                except Exception:
-                    logger.warning("WebSocket Manager: Failed to keep listen key alive.")
-                    self.listen_key = None 
-
-    async def run(self):
-        self.is_running = True
-        self.keep_alive_task = asyncio.create_task(self._keep_alive_listen_key())
-        while self.is_running:
-            if not self.listen_key and not await self._get_listen_key():
-                await asyncio.sleep(60); continue
-            streams = [f"{s.lower().replace('/', '')}@ticker" for s in self.public_subscriptions]
-            if self.listen_key: streams.append(self.listen_key)
-            if not streams:
-                await asyncio.sleep(10); continue
-            uri = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
+# --- OKX Specific WebSocket & TradeGuardian ---
+class TradeGuardian:
+    def __init__(self, application): self.application = application
+    async def handle_ticker_update(self, ticker_data):
+        async with trade_management_lock:
+            symbol = ticker_data['instId'].replace('-', '/'); current_price = float(ticker_data['last'])
             try:
-                async with websockets.connect(uri, ping_interval=180, ping_timeout=60) as ws:
-                    self.ws = ws
-                    logger.info(f"✅ [WebSocket] Connected. Watching {len(self.public_subscriptions)} symbols.")
-                    async for message in ws:
-                        await self._handle_message(message)
-            except (websockets.exceptions.ConnectionClosed, Exception) as e:
-                if self.is_running:
-                    logger.warning(f"WebSocket: Connection lost: {e}. Reconnecting in 5s...")
-                    await asyncio.sleep(5)
-                else: break
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
+                    if not trade: return
+                    trade = dict(trade)
+                    # (يمكن إضافة منطق الوقف المتحرك والإشعارات هنا بنفس طريقة بوت باينانس)
+                    if current_price <= trade['stop_loss']:
+                        reason = "فاشلة (SL)"
+                        if trade.get('trailing_sl_active', False):
+                            reason = "تم تأمين الربح (TSL)" if current_price > trade['entry_price'] else "فاشلة (TSL)"
+                        await self._close_trade(trade, reason, current_price)
+                        return
+                    if current_price >= trade['take_profit']: 
+                        await self._close_trade(trade, "ناجحة (TP)", current_price)
+                        return
+            except Exception as e: logger.error(f"OKX Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
-    async def _handle_message(self, message):
+    async def _close_trade(self, trade, reason, close_price):
+        symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
+        bot = self.application.bot
+        logger.info(f"OKX Guardian: Closing {symbol}. Reason: {reason}")
         try:
-            data = json.loads(message)
-            payload = data.get('data', data)
-            event_type = payload.get('e')
+            formatted_quantity = bot_data.exchange.amount_to_precision(symbol, quantity_in_db)
+            params = {'tdMode': 'cash', 'clOrdId': f"close{trade_id}{int(time.time() * 1000)}"}
+            await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity, params=params)
+            
+            pnl = (close_price - trade['entry_price']) * formatted_quantity
+            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+            emoji = "✅" if pnl >= 0 else "🛑"
+            
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
+                await conn.commit()
 
-            if event_type == '24hrTicker':
-                if bot_data.guardian:
-                    await bot_data.guardian.handle_ticker_update(payload)
-            elif event_type == 'executionReport':
-                if payload.get('x') == 'TRADE' and payload.get('S') == 'BUY' and payload.get('X') == 'FILLED':
-                    await handle_order_update(payload)
-            elif event_type == 'listenKeyExpired':
-                logger.warning("Listen key expired. Getting a new one.")
-                self.listen_key = None
-                if self.ws: await self.ws.close()
+            await bot_data.public_ws.unsubscribe([symbol])
+            await safe_send_message(bot, f"{emoji} **تم إغلاق صفقة OKX | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+            
+            if bot_data.smart_brain:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    final_trade_details = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))).fetchone()
+                    if final_trade_details:
+                        await bot_data.smart_brain.add_trade_to_journal(dict(final_trade_details))
         except Exception as e:
-            logger.error(f"Error handling WebSocket message: {e}", exc_info=True)
+            logger.critical(f"CRITICAL: Failed to close OKX trade #{trade_id}: {e}", exc_info=True)
+            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة المنصة يدوياً.")
+            await bot_data.public_ws.unsubscribe([symbol])
 
-    async def sync_subscriptions(self):
-        async with aiosqlite.connect(DB_FILE) as conn:
-            active_symbols = {row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()}
-        if active_symbols != self.public_subscriptions:
-            logger.info(f"WebSocket: Syncing subscriptions. New: {len(active_symbols)}")
-            self.public_subscriptions = active_symbols
-            if self.ws and not self.ws.closed:
-                try: await self.ws.close(code=1000, reason='Subscription change')
-                except Exception: pass
-    
-    async def stop(self):
-        self.is_running = False
-        if self.keep_alive_task: self.keep_alive_task.cancel()
-        if self.ws and not self.ws.closed: await self.ws.close()
+class PublicWebSocketManager:
+    def __init__(self, handler_coro): self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"; self.handler = handler_coro; self.subscriptions = set()
+    async def _send_op(self, op, symbols):
+        if not symbols or not hasattr(self, 'websocket') or not self.websocket.open: return
+        try: await self.websocket.send(json.dumps({"op": op, "args": [{"channel": "tickers", "instId": s.replace('/', '-')} for s in symbols]}))
+        except websockets.exceptions.ConnectionClosed: pass
+    async def subscribe(self, symbols):
+        new = [s for s in symbols if s not in self.subscriptions]; await self._send_op('subscribe', new); self.subscriptions.update(new)
+    async def unsubscribe(self, symbols):
+        old = [s for s in symbols if s in self.subscriptions]; await self._send_op('unsubscribe', old); [self.subscriptions.discard(s) for s in old]
+    async def run(self):
+        while True:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
+                    self.websocket = ws; logger.info("✅ [OKX Public WS] Connected.")
+                    if self.subscriptions: await self.subscribe(list(self.subscriptions))
+                    async for msg in ws:
+                        if msg == 'ping': await ws.send('pong'); continue
+                        data = json.loads(msg)
+                        if data.get('arg', {}).get('channel') == 'tickers' and 'data' in data:
+                            for ticker in data['data']: await self.handler(ticker)
+            except Exception as e:
+                logger.error(f"OKX Public WS failed: {e}. Retrying in 10s...")
+                await asyncio.sleep(10)
+
+class PrivateWebSocketManager:
+    def __init__(self): self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"
+    def _get_auth_args(self):
+        timestamp = str(time.time()); message = timestamp + 'GET' + '/users/self/verify'
+        mac = hmac.new(bytes(OKX_API_SECRET, 'utf8'), bytes(message, 'utf8'), 'sha256')
+        sign = base64.b64encode(mac.digest()).decode()
+        return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRASE, "timestamp": timestamp, "sign": sign}]
+    async def _message_handler(self, msg):
+        if msg == 'ping': await self.websocket.send('pong'); return
+        data = json.loads(msg)
+        if data.get('arg', {}).get('channel') == 'orders':
+            for order in data.get('data', []):
+                if order.get('state') == 'filled' and order.get('side') == 'buy': await handle_filled_buy_order(order)
+    async def run(self):
+        while True:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
+                    self.websocket = ws; logger.info("✅ [OKX Private WS] Connected.")
+                    await ws.send(json.dumps({"op": "login", "args": self._get_auth_args()}))
+                    login_response = json.loads(await ws.recv())
+                    if login_response.get('code') == '0':
+                        logger.info("🔐 [OKX Private WS] Authenticated.")
+                        await ws.send(json.dumps({"op": "subscribe", "args": [{"channel": "orders", "instType": "SPOT"}]}))
+                        async for msg in ws: await self._message_handler(msg)
+                    else: raise ConnectionAbortedError(f"Auth failed: {login_response}")
+            except Exception as e:
+                logger.error(f"OKX Private WS failed: {e}. Retrying in 10s...")
+                await asyncio.sleep(10)
 
 # --- Helper, Settings & DB Management ---
 def load_settings():
@@ -216,6 +239,18 @@ async def broadcast_signal_to_redis(signal):
         logger.error(f"Redis Broadcast Error: {e}", exc_info=True)
 
 # --- Core Trading Logic ---
+async def get_okx_markets():
+    settings = bot_data.settings
+    if time.time() - bot_data.last_markets_fetch > 300:
+        try:
+            logger.info("Fetching and caching all OKX markets..."); all_tickers = await bot_data.exchange.fetch_tickers()
+            bot_data.all_markets = list(all_tickers.values()); bot_data.last_markets_fetch = time.time()
+        except Exception as e: logger.error(f"Failed to fetch all markets: {e}"); return []
+    blacklist = settings.get('asset_blacklist', [])
+    valid_markets = [t for t in bot_data.all_markets if t.get('symbol') and t['symbol'].endswith('/USDT') and t['symbol'].split('/')[0] not in blacklist and t.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_24h_usd'] and t.get('active', True) and not any(k in t['symbol'] for k in ['-SWAP'])]
+    valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
+    return valid_markets[:settings['top_n_symbols_by_volume']]
+
 async def log_pending_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -247,11 +282,11 @@ async def activate_trade(order_id, symbol):
         active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
 
-    await bot_data.websocket_manager.sync_subscriptions()
+    await bot_data.public_ws.subscribe([symbol])
     tp_percent = (new_take_profit / filled_price - 1) * 100
     sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
     reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
-    msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
+    msg = (f"✅ **تم تأكيد شراء OKX | {symbol}**\n"
            f"**الاستراتيجية:** {reasons_ar}\n"
            f"**رقم:** `#{trade['id']}` | **سعر:** `${filled_price:,.4f}`\n"
            f"**الهدف:** `${new_take_profit:,.4f}` `({tp_percent:+.2f}%)`\n"
@@ -268,10 +303,7 @@ async def initiate_real_trade(signal):
     try:
         settings, exchange = bot_data.settings, bot_data.exchange
         trade_size = settings['real_trade_size_usdt']
-        market = exchange.market(signal['symbol'])
-        min_notional = float(market.get('limits', {}).get('notional', {}).get('min', '0'))
-        if trade_size < min_notional * 1.05: return False
-        balance = await exchange.fetch_balance()
+        balance = await exchange.fetch_balance({'type': 'trading'})
         if balance.get('USDT', {}).get('free', 0.0) < trade_size: return False
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
@@ -284,9 +316,10 @@ async def initiate_real_trade(signal):
     except Exception as e:
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
 
-async def handle_order_update(order_data):
-    if order_data.get('X') == 'FILLED' and order_data.get('S') == 'BUY':
-        await activate_trade(order_data['i'], order_data['s'].replace('USDT', '/USDT'))
+async def handle_filled_buy_order(order_data):
+    symbol, order_id = order_data['instId'].replace('-', '/'), order_data['ordId']
+    if float(order_data.get('avgPx', 0)) > 0:
+        await activate_trade(order_id, symbol)
 
 # --- Scanner Worker and Main Scan Function ---
 async def worker_batch(queue, signals_list, errors_list):
@@ -300,7 +333,7 @@ async def worker_batch(queue, signals_list, errors_list):
             if len(ohlcv) < 50: queue.task_done(); continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # --- Confluence Filter ---
+            # --- Confluence Filter --- (Same as Binance version)
             if settings.get('multi_timeframe_confluence_enabled', True):
                 try:
                     ohlcv_1h_task = exchange.fetch_ohlcv(symbol, '1h', limit=100)
@@ -317,8 +350,6 @@ async def worker_batch(queue, signals_list, errors_list):
                         queue.task_done(); continue
                 except Exception: pass
             
-            # --- Other Filters (Spread, Volume, etc.) would be added here ---
-
             # --- Scanners ---
             confirmed_reasons = []
             if 'whale_radar' in settings['active_scanners']:
@@ -349,13 +380,13 @@ async def worker_batch(queue, signals_list, errors_list):
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if not bot_data.trading_enabled: return
-        scan_start_time = time.time(); logger.info("--- Starting new Maestro scan... ---")
+        scan_start_time = time.time(); logger.info("--- Starting new OKX Maestro scan... ---")
         settings = bot_data.settings
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending')")).fetchone())[0]
         if active_trades_count >= settings['max_concurrent_trades']: return
         
-        top_markets = await brain.get_binance_markets(bot_data)
+        top_markets = await get_okx_markets()
         if not top_markets: return
         queue, signals_found, analysis_errors = asyncio.Queue(), [], []
         for market in top_markets:
@@ -376,14 +407,14 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"duration_seconds": int(scan_duration), "checked_symbols": len(top_markets)}
-        logger.info(f"Scan complete in {int(scan_duration)}s. Found {len(signals_found)} signals, opened {trades_opened_count} trades.")
+        logger.info(f"OKX Scan complete in {int(scan_duration)}s. Found {len(signals_found)} signals, opened {trades_opened_count} trades.")
 
 # --- Scheduled Jobs ---
 async def maestro_job(context: ContextTypes.DEFAULT_TYPE):
+    # This job is identical to the Binance version
     if not bot_data.settings.get('maestro_mode_enabled', True): return
-    logger.info("🎼 Maestro: Analyzing market regime and adjusting tactics...")
+    logger.info("🎼 Maestro (OKX): Analyzing market regime...")
     regime = await brain.get_market_regime(bot_data.exchange)
-    
     if regime != "UNKNOWN" and regime != bot_data.current_market_regime:
         bot_data.current_market_regime = regime
         config = DECISION_MATRIX.get(regime, {})
@@ -391,23 +422,17 @@ async def maestro_job(context: ContextTypes.DEFAULT_TYPE):
         changes_report = []
         for key, value in config.items():
             if key in bot_data.settings and bot_data.settings[key] != value:
-                old_value = bot_data.settings[key]
+                changes_report.append(f"- `{key}` changed to `{value}`")
                 bot_data.settings[key] = value
-                changes_report.append(f"- `{key}` from `{old_value}` to `{value}`")
         save_settings()
         if changes_report:
-            report_text = "\n".join(changes_report)
-            active_scanners_str = ' + '.join([STRATEGY_NAMES_AR.get(s, s) for s in config.get('active_scanners', [])])
-            report = (f"🎼 **تقرير المايسترو | {regime}**\n"
-                      f"تم تعديل التكوين ليتناسب مع حالة السوق.\n\n"
-                      f"**أهم التغييرات:**\n{report_text}\n\n"
-                      f"**الاستراتيجيات النشطة الآن:**\n{active_scanners_str}")
+            report = f"🎼 **Maestro Report (OKX) | {regime}**\n" + "\n".join(changes_report)
             await safe_send_message(context.bot, report)
 
 # --- Telegram UI & Bot Startup ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في **Wise Maestro Bot**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("أهلاً بك في **Wise Maestro Bot - OKX Edition**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'setting_to_change' in context.user_data or 'blacklist_action' in context.user_data:
@@ -417,11 +442,10 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif text == "الإعدادات ⚙️": await ui_handlers.show_settings_menu(update, context)
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This logic is identical for both bots
     user_input = update.message.text.strip()
-    # Handle blacklist
     if 'blacklist_action' in context.user_data:
-        action = context.user_data.pop('blacklist_action')
-        blacklist = bot_data.settings.get('asset_blacklist', [])
+        action = context.user_data.pop('blacklist_action'); blacklist = bot_data.settings.get('asset_blacklist', [])
         symbol = user_input.upper().replace("/USDT", "")
         if action == 'add':
             if symbol not in blacklist: blacklist.append(symbol)
@@ -430,12 +454,9 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         save_settings()
         await update.message.reply_text(f"✅ تم تحديث القائمة السوداء.")
-        # Refresh menu
         dummy_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer': (lambda *args, **kwargs: asyncio.sleep(0))})
         await ui_handlers.show_blacklist_menu(Update(update.update_id, callback_query=dummy_query), context)
         return
-
-    # Handle other parameters
     if not (setting_key := context.user_data.get('setting_to_change')): return
     try:
         keys = setting_key.split('_'); current_level = bot_data.settings
@@ -451,26 +472,18 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         if 'setting_to_change' in context.user_data: del context.user_data['setting_to_change']
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This entire handler is identical for both bots as it calls shared ui_handlers
     query = update.callback_query; await query.answer(); data = query.data
     route_map = {
-        "db_stats": ui_handlers.show_stats_command, 
-        "db_trades": ui_handlers.show_trades_command, 
-        "db_history": ui_handlers.show_trade_history_command,
-        "db_mood": ui_handlers.show_mood_command, 
-        "db_diagnostics": ui_handlers.show_diagnostics_command, 
-        "back_to_dashboard": ui_handlers.show_dashboard_command,
-        "db_portfolio": ui_handlers.show_portfolio_command, 
-        "db_manual_scan": (lambda u,c: context.job_queue.run_once(perform_scan, 1)),
-        "settings_main": ui_handlers.show_settings_menu, 
-        "settings_params": ui_handlers.show_parameters_menu, 
-        "settings_scanners": ui_handlers.show_scanners_menu,
-        "settings_presets": ui_handlers.show_presets_menu, 
-        "settings_blacklist": ui_handlers.show_blacklist_menu, 
-        "settings_data": ui_handlers.show_data_management_menu,
-        "settings_adaptive": ui_handlers.show_adaptive_intelligence_menu,
-        "noop": (lambda u,c: None)
+        "db_stats": ui_handlers.show_stats_command, "db_trades": ui_handlers.show_trades_command, 
+        "db_history": ui_handlers.show_trade_history_command, "db_mood": ui_handlers.show_mood_command, 
+        "db_diagnostics": ui_handlers.show_diagnostics_command, "back_to_dashboard": ui_handlers.show_dashboard_command,
+        "db_portfolio": ui_handlers.show_portfolio_command, "db_manual_scan": (lambda u,c: context.job_queue.run_once(perform_scan, 1)),
+        "settings_main": ui_handlers.show_settings_menu, "settings_params": ui_handlers.show_parameters_menu, 
+        "settings_scanners": ui_handlers.show_scanners_menu, "settings_presets": ui_handlers.show_presets_menu, 
+        "settings_blacklist": ui_handlers.show_blacklist_menu, "settings_data": ui_handlers.show_data_management_menu,
+        "settings_adaptive": ui_handlers.show_adaptive_intelligence_menu, "noop": (lambda u,c: None)
     }
-    
     if data in route_map: await route_map[data](update, context)
     elif data.startswith("check_"): await ui_handlers.check_trade_details(update, context)
     elif data.startswith("manual_sell_confirm_"): await ui_handlers.handle_manual_sell_confirmation(update, context)
@@ -480,27 +493,24 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("✅ Trading Resumed" if bot_data.trading_enabled else "🚨 Kill Switch Activated", show_alert=not bot_data.trading_enabled)
         await ui_handlers.show_dashboard_command(update, context)
     elif data.startswith("scanner_toggle_"):
-        key = data.replace("scanner_toggle_", "")
-        scanners_list = bot_data.settings['active_scanners']
+        key = data.replace("scanner_toggle_", ""); scanners_list = bot_data.settings['active_scanners']
         if key in scanners_list:
             if len(scanners_list) > 1: scanners_list.remove(key)
         else: scanners_list.append(key)
-        save_settings(); determine_active_preset()
-        await ui_handlers.show_scanners_menu(update, context)
+        save_settings(); determine_active_preset(); await ui_handlers.show_scanners_menu(update, context)
     elif data.startswith("param_set_"):
         context.user_data['setting_to_change'] = data.replace("param_set_", "")
         await query.message.reply_text(f"Enter new value for `{context.user_data['setting_to_change']}`:")
     elif data.startswith("param_toggle_"):
-        key = data.replace("param_toggle_", "")
-        bot_data.settings[key] = not bot_data.settings.get(key, False)
+        key = data.replace("param_toggle_", ""); bot_data.settings[key] = not bot_data.settings.get(key, False)
         save_settings(); determine_active_preset()
         if "adaptive" in key or "strategy" in key: await ui_handlers.show_adaptive_intelligence_menu(update, context)
         else: await ui_handlers.show_parameters_menu(update, context)
 
 async def post_init(application: Application):
-    logger.info("Performing post-initialization for Wise Maestro Bot...")
-    if not all([TELEGRAM_BOT_TOKEN, BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_CHAT_ID]):
-        logger.critical("FATAL: Missing critical environment variables."); return
+    logger.info("Performing post-initialization for Wise Maestro Bot [OKX Edition]...")
+    if not all([TELEGRAM_BOT_TOKEN, OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRASE, TELEGRAM_CHAT_ID]):
+        logger.critical("FATAL: Missing critical OKX or Telegram environment variables."); return
     try:
         bot_data.redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         await bot_data.redis_client.ping()
@@ -510,15 +520,15 @@ async def post_init(application: Application):
         bot_data.redis_client = None
 
     bot_data.application = application
-    bot_data.exchange = ccxt.binance({'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+    bot_data.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True})
     try:
         await bot_data.exchange.load_markets()
     except Exception as e:
-        logger.critical(f"🔥 FATAL: Could not connect to Binance: {e}"); return
+        logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}"); return
 
-    logger.info("Reconciling SPOT trading state with Binance exchange...")
+    logger.info("Reconciling SPOT trading state with OKX exchange...")
     try:
-        balance = await bot_data.exchange.fetch_balance()
+        balance = await bot_data.exchange.fetch_balance({'type': 'trading'})
         owned_assets = {asset for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0.00001}
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
@@ -530,14 +540,16 @@ async def post_init(application: Application):
             await conn.commit()
         logger.info("State reconciliation complete.")
     except Exception as e:
-        logger.error(f"Failed to reconcile state with exchange: {e}")
+        logger.error(f"Failed to reconcile state with OKX: {e}")
     
     load_settings()
     await init_database()
 
-    bot_data.websocket_manager = WebSocketManager(bot_data.exchange, application)
-    asyncio.create_task(bot_data.websocket_manager.run())
-    await bot_data.websocket_manager.sync_subscriptions()
+    bot_data.trade_guardian = TradeGuardian(application)
+    bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
+    bot_data.private_ws = PrivateWebSocketManager()
+    asyncio.create_task(bot_data.public_ws.run())
+    asyncio.create_task(bot_data.private_ws.run())
     
     bot_data.guardian = MaestroGuardian(bot_data.exchange, application, bot_data, DB_FILE)
     bot_data.smart_brain = EvolutionaryEngine(bot_data.exchange, application, DB_FILE)
@@ -551,21 +563,20 @@ async def post_init(application: Application):
     jq.run_repeating(maestro_job, interval=MAESTRO_INTERVAL_HOURS * 3600, first=5, name="maestro_job")
     jq.run_daily(bot_data.smart_brain.run_pattern_discovery, time=dt_time(hour=22, minute=0, tzinfo=EGYPT_TZ), name='pattern_discovery_job')
     
-    logger.info(f"All jobs scheduled. Maestro is now fully active.")
+    logger.info(f"All jobs scheduled for OKX Bot.")
     try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 Wise Maestro Bot (Final Fusion) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 Wise Maestro Bot (OKX Edition) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: 
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- Wise Maestro Bot is now fully operational ---")
+    logger.info("--- Wise Maestro Bot (OKX Edition) is now fully operational ---")
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
-    if bot_data.websocket_manager: await bot_data.websocket_manager.stop()
     if bot_data.redis_client: await bot_data.redis_client.close()
-    logger.info("Bot has shut down gracefully.")
+    logger.info("OKX Bot has shut down gracefully.")
 
 def main():
-    logger.info("Starting Wise Maestro Bot...")
+    logger.info("Starting Wise Maestro Bot - OKX Edition...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
