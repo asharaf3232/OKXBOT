@@ -1,6 +1,6 @@
 numpy
 ccxt
-pandas
+pandas-ta
 python-telegram-bot
 aiosqlite
 httpx
@@ -8,5 +8,5 @@ feedparser
 nltk
 websockets
 scipy
-redis==5.0.7
+redis>=4.2.0
 python-dotenv
