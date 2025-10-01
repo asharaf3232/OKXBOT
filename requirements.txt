@@ -1,7 +1,6 @@
 numpy
 ccxt
 pandas
-git+git://github.com/twopirllc/pandas-ta.git@v0.3.14b0
 python-telegram-bot
 aiosqlite
 httpx
