@@ -8,5 +8,5 @@ feedparser
 nltk
 websockets
 scipy
-redis
+redis==5.0.7
 python-dotenv
