@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Wise Maestro Bot - OKX Edition v2.0 🚀 ---
+# --- 🚀 Wise Maestro Bot - OKX Edition v2.0 (Unified) 🚀 ---
 # =======================================================================================
 import os
 import logging
@@ -66,8 +66,7 @@ class BotState:
         self.last_markets_fetch = 0
         self.public_ws = None
         self.private_ws = None
-        self.trade_guardian = None
-        self.guardian = None
+        self.guardian = None # سيتم استخدام الحارس المشترك
         self.smart_brain = None
         self.TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID
         self.current_market_regime = "UNKNOWN"
@@ -75,73 +74,35 @@ class BotState:
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
-trade_management_lock = asyncio.Lock()
+# تم نقل هذا المتغير إلى كائن الحالة المشترك bot_data
+# trade_management_lock = asyncio.Lock()
+bot_data.trade_management_lock = asyncio.Lock()
 
-# --- OKX Specific WebSocket & TradeGuardian ---
-class TradeGuardian:
-    def __init__(self, application): self.application = application
-    async def handle_ticker_update(self, ticker_data):
-        async with trade_management_lock:
-            symbol = ticker_data['instId'].replace('-', '/'); current_price = float(ticker_data['last'])
-            try:
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    conn.row_factory = aiosqlite.Row
-                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
-                    if not trade: return
-                    trade = dict(trade)
-                    # (يمكن إضافة منطق الوقف المتحرك والإشعارات هنا بنفس طريقة بوت باينانس)
-                    if current_price <= trade['stop_loss']:
-                        reason = "فاشلة (SL)"
-                        if trade.get('trailing_sl_active', False):
-                            reason = "تم تأمين الربح (TSL)" if current_price > trade['entry_price'] else "فاشلة (TSL)"
-                        await self._close_trade(trade, reason, current_price)
-                        return
-                    if current_price >= trade['take_profit']: 
-                        await self._close_trade(trade, "ناجحة (TP)", current_price)
-                        return
-            except Exception as e: logger.error(f"OKX Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
-    async def _close_trade(self, trade, reason, close_price):
-        symbol, trade_id, quantity_in_db = trade['symbol'], trade['id'], trade['quantity']
-        bot = self.application.bot
-        logger.info(f"OKX Guardian: Closing {symbol}. Reason: {reason}")
-        try:
-            formatted_quantity = bot_data.exchange.amount_to_precision(symbol, quantity_in_db)
-            params = {'tdMode': 'cash', 'clOrdId': f"close{trade_id}{int(time.time() * 1000)}"}
-            await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity, params=params)
-            
-            pnl = (close_price - trade['entry_price']) * formatted_quantity
-            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-            emoji = "✅" if pnl >= 0 else "🛑"
-            
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
-                await conn.commit()
-
-            await bot_data.public_ws.unsubscribe([symbol])
-            await safe_send_message(bot, f"{emoji} **تم إغلاق صفقة OKX | #{trade_id} {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
-            
-            if bot_data.smart_brain:
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    conn.row_factory = aiosqlite.Row
-                    final_trade_details = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))).fetchone()
-                    if final_trade_details:
-                        await bot_data.smart_brain.add_trade_to_journal(dict(final_trade_details))
-        except Exception as e:
-            logger.critical(f"CRITICAL: Failed to close OKX trade #{trade_id}: {e}", exc_info=True)
-            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة المنصة يدوياً.")
-            await bot_data.public_ws.unsubscribe([symbol])
+# --- OKX Specific WebSocket ---
+# --- [التعديل] تم حذف كلاس TradeGuardian المحلي بالكامل ---
 
 class PublicWebSocketManager:
-    def __init__(self, handler_coro): self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"; self.handler = handler_coro; self.subscriptions = set()
+    def __init__(self, handler_coro): 
+        self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
+        self.handler = handler_coro
+        self.subscriptions = set()
+
     async def _send_op(self, op, symbols):
         if not symbols or not hasattr(self, 'websocket') or not self.websocket.open: return
         try: await self.websocket.send(json.dumps({"op": op, "args": [{"channel": "tickers", "instId": s.replace('/', '-')} for s in symbols]}))
         except websockets.exceptions.ConnectionClosed: pass
+
     async def subscribe(self, symbols):
-        new = [s for s in symbols if s not in self.subscriptions]; await self._send_op('subscribe', new); self.subscriptions.update(new)
+        new = [s for s in symbols if s not in self.subscriptions]
+        await self._send_op('subscribe', new)
+        self.subscriptions.update(new)
+
     async def unsubscribe(self, symbols):
-        old = [s for s in symbols if s in self.subscriptions]; await self._send_op('unsubscribe', old); [self.subscriptions.discard(s) for s in old]
+        old = [s for s in symbols if s in self.subscriptions]
+        await self._send_op('unsubscribe', old)
+        [self.subscriptions.discard(s) for s in old]
+
     async def run(self):
         while True:
             try:
@@ -152,7 +113,16 @@ class PublicWebSocketManager:
                         if msg == 'ping': await ws.send('pong'); continue
                         data = json.loads(msg)
                         if data.get('arg', {}).get('channel') == 'tickers' and 'data' in data:
-                            for ticker in data['data']: await self.handler(ticker)
+                            for ticker in data['data']:
+                                # --- [التعديل] ---
+                                # 1. تحويل بيانات OKX إلى التنسيق الموحد
+                                standard_ticker = {
+                                    'symbol': ticker['instId'].replace('-', '/'),
+                                    'price': float(ticker['last'])
+                                }
+                                # 2. إرسال البيانات الموحدة إلى الحارس المشترك
+                                await self.handler(standard_ticker)
+                                # --- [نهاية التعديل] ---
             except Exception as e:
                 logger.error(f"OKX Public WS failed: {e}. Retrying in 10s...")
                 await asyncio.sleep(10)
@@ -281,7 +251,8 @@ async def activate_trade(order_id, symbol):
         await conn.execute("UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ?, last_profit_notification_price = ? WHERE id = ?", (filled_price, net_filled_quantity, new_take_profit, filled_price, trade['id']))
         active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
-
+    
+    # Use the shared WebSocket manager to subscribe
     await bot_data.public_ws.subscribe([symbol])
     tp_percent = (new_take_profit / filled_price - 1) * 100
     sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
@@ -293,6 +264,7 @@ async def activate_trade(order_id, symbol):
            f"**الوقف:** `${trade['stop_loss']:,.4f}` `({sl_percent:.2f}%)`\n"
            f"**الصفقات النشطة:** `{active_trades_count}`")
     await safe_send_message(bot, msg)
+
 
 async def has_active_trade_for_symbol(symbol: str) -> bool:
     async with aiosqlite.connect(DB_FILE) as conn:
@@ -333,7 +305,6 @@ async def worker_batch(queue, signals_list, errors_list):
             if len(ohlcv) < 50: queue.task_done(); continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             
-            # --- Confluence Filter --- (Same as Binance version)
             if settings.get('multi_timeframe_confluence_enabled', True):
                 try:
                     ohlcv_1h_task = exchange.fetch_ohlcv(symbol, '1h', limit=100)
@@ -350,7 +321,6 @@ async def worker_batch(queue, signals_list, errors_list):
                         queue.task_done(); continue
                 except Exception: pass
             
-            # --- Scanners ---
             confirmed_reasons = []
             if 'whale_radar' in settings['active_scanners']:
                 if await scanners.filter_whale_radar(exchange, symbol, settings):
@@ -411,7 +381,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
 # --- Scheduled Jobs ---
 async def maestro_job(context: ContextTypes.DEFAULT_TYPE):
-    # This job is identical to the Binance version
     if not bot_data.settings.get('maestro_mode_enabled', True): return
     logger.info("🎼 Maestro (OKX): Analyzing market regime...")
     regime = await brain.get_market_regime(bot_data.exchange)
@@ -442,7 +411,6 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif text == "الإعدادات ⚙️": await ui_handlers.show_settings_menu(update, context)
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This logic is identical for both bots
     user_input = update.message.text.strip()
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action'); blacklist = bot_data.settings.get('asset_blacklist', [])
@@ -472,7 +440,6 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         if 'setting_to_change' in context.user_data: del context.user_data['setting_to_change']
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This entire handler is identical for both bots as it calls shared ui_handlers
     query = update.callback_query; await query.answer(); data = query.data
     route_map = {
         "db_stats": ui_handlers.show_stats_command, "db_trades": ui_handlers.show_trades_command, 
@@ -545,15 +512,19 @@ async def post_init(application: Application):
     load_settings()
     await init_database()
 
-    bot_data.trade_guardian = TradeGuardian(application)
-    bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
-    bot_data.private_ws = PrivateWebSocketManager()
-    asyncio.create_task(bot_data.public_ws.run())
-    asyncio.create_task(bot_data.private_ws.run())
-    
+    # --- [التعديل] ---
+    # 1. تهيئة الحارس المشترك والعقل الذكي أولاً
     bot_data.guardian = MaestroGuardian(bot_data.exchange, application, bot_data, DB_FILE)
     bot_data.smart_brain = EvolutionaryEngine(bot_data.exchange, application, DB_FILE)
 
+    # 2. تهيئة WebSocket وتمرير دالة المعالج الموحد من الحارس
+    bot_data.public_ws = PublicWebSocketManager(bot_data.guardian.handle_ticker_update)
+    bot_data.private_ws = PrivateWebSocketManager()
+    asyncio.create_task(bot_data.public_ws.run())
+    asyncio.create_task(bot_data.private_ws.run())
+    # --- [نهاية التعديل] ---
+    
+    # جدولة المهام
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(bot_data.guardian.the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="supervisor_job")
