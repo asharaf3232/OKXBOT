@@ -1362,28 +1362,28 @@ class OKXWebSocketManager:
             await conn.commit()
             await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
             await self.sync_subscriptions()
-async def sync_subscriptions(self):
-    """
-    [تم الإصلاح النهائي] يضمن إعادة الاتصال عند تغيير الصفقات النشطة.
-    """
-    async with aiosqlite.connect(DB_FILE) as conn:
-        active_symbols_tuples = await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()
-        active_symbols = {row[0] for row in active_symbols_tuples}
 
-    if active_symbols != self.public_subscriptions:
-        logger.info(f"OKX WebSocket Manager: Syncing subscriptions. Old: {len(self.public_subscriptions)}, New: {len(active_symbols)}")
-        self.public_subscriptions = active_symbols
-        
-        # --- [الإصلاح النهائي هنا] ---
-        # استخدام .open لإغلاق الاتصال القديم قبل إعادة الاتصال باشتراكات جديدة
-        if self.public_ws and self.public_ws.open:
-            try: await self.public_ws.close(code=1000, reason='Subscription change')
-            except Exception: pass
-        
-        # لا نحتاج لإعادة تشغيل الاتصال الخاص لأنه لا يعتمد على الرموز
-        # سيتم إعادة الاتصال تلقائياً بواسطة حلقة التشغيل الرئيسية
+    async def sync_subscriptions(self):
+        async with aiosqlite.connect(DB_FILE) as conn:
+            active_symbols = {row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()}
 
+        if active_symbols != self.public_subscriptions:
+            logger.info(f"OKX WebSocket Manager: Syncing subscriptions. Old: {len(self.public_subscriptions)}, New: {len(active_symbols)}")
+            self.public_subscriptions = active_symbols
+            # إعادة الاشتراك عبر إغلاق وإعادة فتح الاتصال
+            if self.public_ws and not self.public_ws.closed:
+                try: await self.public_ws.close(code=1000, reason='Subscription change')
+                except Exception: pass
+            if self.private_ws and not self.private_ws.closed:
+                try: await self.private_ws.close(code=1000, reason='Subscription change')
+                except Exception: pass
 
+    async def stop(self):
+        self.is_running = False
+        if self.public_ws and not self.public_ws.closed:
+            await self.public_ws.close()
+        if self.private_ws and not self.private_ws.closed:
+            await self.private_ws.close()
 # =======================================================================================
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
