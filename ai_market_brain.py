@@ -102,13 +102,24 @@ async def get_market_regime(exchange):
         logger.error(f"Market Regime Analysis failed: {e}")
         return "UNKNOWN"
 
+# ai_market_brain.py
+
 async def get_market_mood(bot_data):
     settings = bot_data.settings
     btc_mood_text = "الفلتر معطل"
 
     if settings.get('btc_trend_filter_enabled', True):
         try:
-            htf_period = settings['trend_filters']['htf_period']
+            # --- [الإصلاح] ---
+            # الوصول الآمن إلى الإعدادات المتداخلة
+            trend_filters = settings.get('trend_filters', {})
+            htf_period = trend_filters.get('htf_period')
+            # --------------------
+
+            # التأكد من أن القيمة موجودة قبل المتابعة
+            if htf_period is None:
+                 raise ValueError("htf_period not found in trend_filters settings.")
+
             ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['sma'] = ta.sma(df['close'], length=htf_period)
@@ -117,6 +128,7 @@ async def get_market_mood(bot_data):
             if not is_btc_bullish:
                 return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
         except Exception as e:
+            # الآن سيظهر الخطأ الحقيقي إذا كان هناك مشكلة أخرى
             return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
 
     if settings.get('market_mood_filter_enabled', True):
@@ -125,7 +137,6 @@ async def get_market_mood(bot_data):
             return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
 
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
-
 async def get_okx_markets(bot_data):
     settings = bot_data.settings
     # --- [الإصلاح النهائي] --- طريقة جديدة أكثر موثوقية لجلب وفلترة الأسواق
