@@ -108,7 +108,15 @@ async def get_market_mood(bot_data):
 
     if settings.get('btc_trend_filter_enabled', True):
         try:
-            htf_period = settings['trend_filters']['htf_period']
+            # --- [السطر الذي كان يسبب المشكلة] ---
+            # htf_period = settings['trend_filters']['htf_period']
+            
+            # --- [التصحيح] ---
+            # الوصول الآمن للقيم مع توفير قيم افتراضية
+            trend_filters_config = settings.get('trend_filters', {})
+            htf_period = trend_filters_config.get('htf_period', 50)
+            # --- [نهاية التصحيح] ---
+
             ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['sma'] = ta.sma(df['close'], length=htf_period)
@@ -117,6 +125,7 @@ async def get_market_mood(bot_data):
             if not is_btc_bullish:
                 return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
         except Exception as e:
+            # تم تعديل رسالة الخطأ لتكون أكثر وضوحًا
             return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
 
     if settings.get('market_mood_filter_enabled', True):
@@ -128,14 +137,11 @@ async def get_market_mood(bot_data):
 
 async def get_okx_markets(bot_data):
     settings = bot_data.settings
-    # --- [الإصلاح النهائي] --- طريقة جديدة أكثر موثوقية لجلب وفلترة الأسواق
     if time.time() - bot_data.last_markets_fetch > 300:
         try:
             logger.info("Force reloading and caching all OKX markets...")
-            # الخطوة 1: تحميل جميع الأسواق المتاحة بهيكلها الكامل
             all_markets_data = await bot_data.exchange.load_markets(True)
             
-            # الخطوة 2: فلترة هذه الأسواق لاختيار أزواج التداول الفوري (SPOT) مقابل USDT فقط
             bot_data.all_markets = [
                 market for symbol, market in all_markets_data.items()
                 if market.get('spot', False) and market.get('quote', '') == 'USDT' and market.get('active', True)
@@ -144,7 +150,7 @@ async def get_okx_markets(bot_data):
             logger.info(f"Successfully cached {len(bot_data.all_markets)} SPOT USDT markets.")
         except Exception as e:
             logger.error(f"CRITICAL: Failed to load markets structure from OKX: {e}", exc_info=True)
-            return [] # إرجاع قائمة فارغة عند الفشل الحرج
+            return []
 
     if not bot_data.all_markets:
         logger.warning("Market cache is empty, cannot proceed.")
@@ -153,14 +159,11 @@ async def get_okx_markets(bot_data):
     blacklist = settings.get('asset_blacklist', [])
     min_volume = settings.get('liquidity_filters', {}).get('min_quote_volume_24h_usd', 1000000)
 
-    # الخطوة 3: جلب بيانات Tickers للحصول على حجم التداول والأسعار
     symbols_to_fetch = [m['symbol'] for m in bot_data.all_markets]
     try:
-        # هذا الطلب قد يكون كبيرًا، OKX تتعامل معه بشكل جيد عادة
         tickers = await bot_data.exchange.fetch_tickers(symbols_to_fetch)
     except Exception as e:
         logger.error(f"Failed to fetch tickers for volume check: {e}")
-        # لا تتوقف هنا، قد تكون مشكلة مؤقتة. سنعتمد على الكاش القديم إن وجد
         return []
 
     valid_markets = []
@@ -168,11 +171,9 @@ async def get_okx_markets(bot_data):
         symbol = market['symbol']
         ticker_data = tickers.get(symbol)
         
-        # إذا لم نجد بيانات التيكر لهذا السوق، نتجاهله
         if not ticker_data or ticker_data.get('quoteVolume') is None:
             continue
         
-        # تطبيق الفلاتر
         base_currency = market.get('base', '')
         quote_volume = ticker_data['quoteVolume']
 
@@ -185,7 +186,6 @@ async def get_okx_markets(bot_data):
             
         valid_markets.append(ticker_data)
 
-    # ترتيب حسب حجم التداول واختيار الأعلى
     valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
     
     final_list = valid_markets[:settings.get('top_n_symbols_by_volume', 300)]
