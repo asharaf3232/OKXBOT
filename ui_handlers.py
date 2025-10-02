@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🎨 ملف واجهة المستخدم v10.2 (النسخة النهائية الكاملة والصحيحة) 🎨 ---
+# --- 🎨 ملف واجهة المستخدم v10.3 (النسخة النهائية الكاملة والصحيحة) 🎨 ---
 # =======================================================================================
 
 import os
@@ -55,16 +55,12 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
     ks_status_emoji = "🚨" if not bot_data.trading_enabled else "✅"
     ks_status_text = "الإيقاف مفعل" if not bot_data.trading_enabled else "يعمل"
     
-    # --- [التعديل] تصميم جديد للأزرار لتكون أكبر ---
+    # --- [التعديل] تصميم جديد للأزرار (2 في كل سطر) مثل الصورة المطلوبة ---
     keyboard = [
-        [InlineKeyboardButton("💼 نظرة عامة", callback_data="db_portfolio")],
-        [InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_trades")],
-        [InlineKeyboardButton("📜 سجل الصفقات", callback_data="db_history")],
-        [InlineKeyboardButton("📊 الإحصائيات", callback_data="db_stats")],
-        [InlineKeyboardButton("🌡️ مزاج السوق", callback_data="db_mood")],
-        [InlineKeyboardButton("🔬 فحص فوري", callback_data="db_manual_scan")],
-        [InlineKeyboardButton("🗓️ تقرير اليوم", callback_data="db_daily_report")],
-        [InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_diagnostics")],
+        [InlineKeyboardButton("💼 نظرة عامة", callback_data="db_portfolio"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_trades")],
+        [InlineKeyboardButton("📜 سجل الصفقات", callback_data="db_history"), InlineKeyboardButton("📊 الإحصائيات", callback_data="db_stats")],
+        [InlineKeyboardButton("🌡️ مزاج السوق", callback_data="db_mood"), InlineKeyboardButton("🔬 فحص فوري", callback_data="db_manual_scan")],
+        [InlineKeyboardButton("🗓️ تقرير اليوم", callback_data="db_daily_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_diagnostics")],
         [InlineKeyboardButton(f"{ks_status_emoji} {ks_status_text}", callback_data="kill_switch_toggle")]
     ]
     
@@ -171,26 +167,41 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_mood")], [InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]; await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # --- [الإصلاح النهائي] --- دالة آمنة تمامًا لعرض تقرير التشخيص
+    query = update.callback_query
+    if query: await query.answer("جاري جلب بيانات التشخيص...")
     bot_data = context.bot_data
-    scan_info = bot_data.last_scan_info
-    db_size = f"{os.path.getsize(DB_FILE) / 1024:.2f} KB" if os.path.exists(DB_FILE) else "N/A"
     
+    # جلب المعلومات بأمان مع قيم افتراضية
+    scan_info = getattr(bot_data, 'last_scan_info', {})
+    duration = scan_info.get('duration_seconds', 'لم يحدث بعد')
+    checked_symbols = scan_info.get('checked_symbols', '0')
+    active_preset_name = getattr(bot_data, 'active_preset_name', 'مخصص')
+    
+    # التحقق من وجود ملف قاعدة البيانات وحجمه
+    db_size = f"{os.path.getsize(DB_FILE) / 1024:.2f} KB" if os.path.exists(DB_FILE) else "غير موجود"
+    
+    # جلب معلومات الصفقات من قاعدة البيانات بأمان
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            total_trades, active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0], (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
-    except Exception as e:
+            total_trades_cursor = await conn.execute("SELECT COUNT(*) FROM trades")
+            total_trades = (await total_trades_cursor.fetchone())[0]
+            active_trades_cursor = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")
+            active_trades = (await active_trades_cursor.fetchone())[0]
+    except Exception:
         total_trades, active_trades = "خطأ", "خطأ"
-        print(f"Diagnostics DB Error: {e}")
 
-    ws_status = "متصل ✅" if bot_data.public_ws and bot_data.public_ws.websocket and bot_data.public_ws.websocket.open else "غير متصل ❌"
-    
-    # --- [الإصلاح] ---
-    active_preset_name = getattr(bot_data, 'active_preset_name', 'مخصص')
+    # التحقق من حالة WebSocket
+    ws_status = "غير متصل ❌"
+    if hasattr(bot_data, 'public_ws') and bot_data.public_ws:
+        if hasattr(bot_data.public_ws, 'websocket') and bot_data.public_ws.websocket:
+            if getattr(bot_data.public_ws.websocket, 'open', False):
+                ws_status = "متصل ✅"
     
     report = (f"🕵️‍♂️ *تقرير التشخيص*\n\n"
               f"**🔬 آخر فحص:**\n"
-              f"- المدة: {scan_info.get('duration_seconds', 'N/A')} ثانية\n"
-              f"- العملات: {scan_info.get('checked_symbols', 'N/A')}\n\n"
+              f"- المدة: {duration} ثانية\n"
+              f"- العملات: {checked_symbols}\n\n"
               f"**🔧 الإعدادات:**\n"
               f"- النمط: {active_preset_name}\n\n"
               f"**🔩 العمليات:**\n"
@@ -198,7 +209,7 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
               f"- DB: {db_size} | {total_trades} ({active_trades} نشطة)")
               
     keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]
-    await safe_edit_message(update.callback_query, report, reply_markup=InlineKeyboardMarkup(keyboard))
+    await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def send_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
