@@ -8,6 +8,7 @@ import asyncio
 import json
 import time
 import copy
+import pandas as pd
 from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 import aiosqlite
@@ -99,9 +100,12 @@ async def worker_batch(queue, signals_list, errors_list):
             market, ohlcv = item['market'], item['ohlcv']
             symbol = market['symbol']
             
+            # 💡 التعديل الرئيسي: إضافة منطق تجهيز البيانات
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df = df.set_index('timestamp').sort_index()
+            # -----------------------------------------------
+            
             if len(df) < 50:
                 queue.task_done(); continue
             
@@ -243,7 +247,6 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}", exc_info=True); return
 
-    load_settings()
     await init_database()
     logger.info("✅ Step 2/5: Settings and database initialized.")
     
@@ -257,11 +260,11 @@ async def post_init(application: Application):
     asyncio.create_task(bot_data.private_ws.run())
     logger.info("✅ Step 4/5: WebSockets initiated.")
 
-    # --- [الكود المُعدّل] ---
+    # 💡 التعديل الرئيسي: إضافة تأخير لضمان استقرار اتصال الويب سوكت
     logger.info("Waiting 5s for WebSocket connections to establish before syncing...")
     await asyncio.sleep(5)
     await bot_data.guardian.sync_subscriptions()
-    # --- [نهاية التعديل] ---
+    # ----------------------------------------------------
     
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
@@ -283,6 +286,9 @@ async def post_shutdown(application: Application):
 
 def main():
     logger.info("--- Starting Wise Maestro Bot ---")
+    # 💡 التعديل الرئيسي: نقل استدعاء load_settings() إلى هنا
+    load_settings()
+    # -----------------------------------------------
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
