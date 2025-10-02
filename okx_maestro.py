@@ -1816,7 +1816,7 @@ def main():
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init)
     application = app_builder.build()
-    
+
     application.bot_data = bot_data
 
     application.add_handler(CommandHandler("start", start_command))
@@ -1827,4 +1827,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
