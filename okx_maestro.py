@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Wise Maestro Bot | v304.0 (Complete & Unabridged Final Version) 🚀 ---
+# --- 🚀 Wise Maestro Bot | v400.0 (Ecosystem Final Version) 🚀 ---
 # =======================================================================================
 import os
 import logging
@@ -18,18 +18,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from telegram.constants import ParseMode
 from telegram.error import Forbidden
 
-# --- [الإصلاح النهائي لمشكلة المتغيرات] ---
-from dotenv import load_dotenv
-try:
-    dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
-    if os.path.exists(dotenv_path):
-        load_dotenv(dotenv_path=dotenv_path)
-    else:
-        pass 
-except Exception as e:
-    print(f"Could not load .env file: {e}")
-# --- [نهاية الإصلاح] ---
-
+# --- تم حذف `dotenv` لأنه لم يعد مطلوبًا مع ملف ecosystem ---
 
 # --- استيراد الوحدات المنفصلة ---
 from settings_config import *
@@ -39,6 +28,12 @@ from smart_engine import EvolutionaryEngine
 import ui_handlers
 from wise_maestro_guardian import TradeGuardian, PublicWebSocketManager, PrivateWebSocketManager
 
+# --- جلب المتغيرات مباشرة من بيئة التشغيل التي يوفرها PM2 ---
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+OKX_API_KEY = os.getenv('OKX_API_KEY')
+OKX_API_SECRET = os.getenv('OKX_API_SECRET')
+OKX_API_PASSPHRSE = os.getenv('OKX_API_PASSPHRSE')
 # --- جلب المتغيرات ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
