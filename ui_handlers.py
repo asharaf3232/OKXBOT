@@ -384,3 +384,69 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             del context.user_data['setting_to_change']
 
     with open(SETTINGS_FILE, 'w') as f: import json; json.dump(settings, f, indent=4)
+        # =======================================================================================
+# --- معالج الأزرار الموحد (Button Router) ---
+# =======================================================================================
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """هذه الدالة هي قلب الواجهة التفاعلية، تستقبل كل الضغطات وتوجهها."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # قاموس يربط كل زر بالدالة المسؤولة عنه
+    route_map = {
+        # Dashboard routes
+        "db_portfolio": show_portfolio_command,
+        "db_trades": show_trades_command,
+        "db_history": show_trade_history_command,
+        "db_stats": show_stats_command,
+        "db_mood": show_mood_command,
+        "db_manual_scan": manual_scan_command,
+        "db_daily_report": send_daily_report,
+        "kill_switch_toggle": toggle_kill_switch,
+        "db_diagnostics": show_diagnostics_command,
+        "back_to_dashboard": show_dashboard_command,
+        "db_strategy_report": show_strategy_report_command,
+        
+        # Settings routes
+        "settings_main": show_settings_menu,
+        "settings_adaptive": show_adaptive_intelligence_menu,
+        "settings_params": show_parameters_menu,
+        "settings_scanners": show_scanners_menu,
+        "settings_presets": show_presets_menu,
+        "settings_blacklist": show_blacklist_menu,
+        "settings_data": show_data_management_menu,
+
+        # Data management actions
+        "data_clear_confirm": handle_clear_data_confirmation,
+        "data_clear_execute": handle_clear_data_execute,
+        
+        # Blacklist actions
+        "blacklist_add": handle_blacklist_action,
+        "blacklist_remove": handle_blacklist_action,
+        
+        "noop": (lambda u,c: None) # زر لا يفعل شيئاً
+    }
+    
+    try:
+        if data in route_map:
+            await route_map[data](update, context)
+        elif data.startswith("check_"):
+            await check_trade_details(update, context)
+        elif data.startswith("manual_sell_confirm_"):
+            await handle_manual_sell_confirmation(update, context)
+        elif data.startswith("manual_sell_execute_"):
+            await handle_manual_sell_execute(update, context)
+        elif data.startswith("scanner_toggle_"):
+            await handle_scanner_toggle(update, context)
+        elif data.startswith("preset_set_"):
+            await handle_preset_set(update, context)
+        elif data.startswith("param_set_"):
+            await handle_parameter_selection(update, context)
+        elif data.startswith("param_toggle_"):
+            await handle_toggle_parameter(update, context)
+        elif data.startswith("strategy_adjust_"):
+            await handle_strategy_adjustment(update, context)
+    except Exception as e:
+        print(f"Error in button_callback_handler for data '{data}': {e}") # استبدل بـ logger
