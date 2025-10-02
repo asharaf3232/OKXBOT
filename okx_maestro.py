@@ -1362,8 +1362,7 @@ class OKXWebSocketManager:
             await conn.commit()
             await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
             await self.sync_subscriptions()
-
- async def sync_subscriptions(self):
+async def sync_subscriptions(self):
     """
     [تم الإصلاح النهائي] يضمن إعادة الاتصال عند تغيير الصفقات النشطة.
     """
