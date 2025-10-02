@@ -3,7 +3,7 @@ import copy
 from collections import defaultdict
 
 # =======================================================================================
-# --- ⚙️ Core Configuration Defaults ⚙️ ---
+# --- ⚙️ Core Configuration Defaults v2.0 (Corrected and Completed) ⚙️ ---
 # =======================================================================================
 
 TIMEFRAME = '15m'
@@ -52,12 +52,17 @@ DEFAULT_SETTINGS = {
     "strategy_deactivation_threshold_wr": 45.0,
     "dynamic_sizing_max_increase_pct": 25.0,
     "dynamic_sizing_max_decrease_pct": 50.0,
-    # Maestro & Reviewer (from OKX Bot)
+    # Maestro & Reviewer
     "intelligent_reviewer_enabled": True,
     "momentum_scalp_mode_enabled": False,
     "momentum_scalp_target_percent": 0.5,
     "multi_timeframe_confluence_enabled": True,
     "maestro_mode_enabled": True,
+    # Wise Man (Portfolio Risk)
+    "portfolio_risk_rules": {
+        "max_asset_concentration_pct": 30.0,
+        "max_sector_concentration_pct": 50.0,
+    }
 }
 
 # --- الأسماء العربية للاستراتيجيات ---
@@ -68,47 +73,32 @@ STRATEGY_NAMES_AR = {
     "bollinger_reversal": "انعكاس بولينجر"
 }
 
+# --- [الإضافة التي تم تصحيحها] ---
+# --- الأسماء العربية للأنماط الجاهزة ---
+PRESET_NAMES_AR = {
+    "professional": "احترافي",
+    "strict": "متشدد",
+    "lenient": "متساهل",
+    "very_lenient": "فائق التساهل",
+    "bold_heart": "القلب الجريء"
+}
+
 # --- مصفوفة قرارات المايسترو (Maestro Decision Matrix) ---
 DECISION_MATRIX = {
-    "TRENDING_HIGH_VOLATILITY": {
-        "intelligent_reviewer_enabled": True,
-        "momentum_scalp_mode_enabled": True,
-        "multi_timeframe_confluence_enabled": True,
-        "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "sniper_pro", "whale_radar"],
-        "risk_reward_ratio": 1.5,
-        "volume_filter_multiplier": 2.5
-    },
-    "TRENDING_LOW_VOLATILITY": {
-        "intelligent_reviewer_enabled": True,
-        "momentum_scalp_mode_enabled": False,
-        "multi_timeframe_confluence_enabled": True,
-        "active_scanners": ["support_rebound", "supertrend_pullback", "rsi_divergence"],
-        "risk_reward_ratio": 2.5,
-        "volume_filter_multiplier": 1.5
-    },
-    "SIDEWAYS_HIGH_VOLATILITY": {
-        "intelligent_reviewer_enabled": True,
-        "momentum_scalp_mode_enabled": True,
-        "multi_timeframe_confluence_enabled": False,
-        "active_scanners": ["bollinger_reversal", "rsi_divergence", "breakout_squeeze_pro"],
-        "risk_reward_ratio": 2.0,
-        "volume_filter_multiplier": 2.0
-    },
-    "SIDEWAYS_LOW_VOLATILITY": {
-        "intelligent_reviewer_enabled": False,
-        "momentum_scalp_mode_enabled": False,
-        "multi_timeframe_confluence_enabled": True,
-        "active_scanners": ["bollinger_reversal", "support_rebound"],
-        "risk_reward_ratio": 3.0,
-        "volume_filter_multiplier": 1.0
-    }
+    "TRENDING_HIGH_VOLATILITY": {"active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "sniper_pro"], "risk_reward_ratio": 1.5, "volume_filter_multiplier": 2.5},
+    "TRENDING_LOW_VOLATILITY": {"active_scanners": ["support_rebound", "supertrend_pullback", "rsi_divergence"], "risk_reward_ratio": 2.5, "volume_filter_multiplier": 1.5},
+    "SIDEWAYS_HIGH_VOLATILITY": {"active_scanners": ["bollinger_reversal", "rsi_divergence", "breakout_squeeze_pro"], "risk_reward_ratio": 2.0},
+    "SIDEWAYS_LOW_VOLATILITY": {"active_scanners": ["bollinger_reversal", "support_rebound"], "risk_reward_ratio": 3.0}
 }
 
 # --- قوالب الإعدادات الجاهزة (Presets) ---
+# [الإضافة التي تم تصحيحها] تمت إضافة كل الأنماط
 SETTINGS_PRESETS = {
-    "professional": copy.deepcopy(DEFAULT_SETTINGS),
-    "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28},
-    "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20},
+    "professional": copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}),
+    "strict": {**copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
+    "lenient": {**copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
+    "very_lenient": {**copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), "max_concurrent_trades": 12, "adx_filter_enabled": False, "market_mood_filter_enabled": False, "trend_filters": {"enabled": False}, "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0}},
+    "bold_heart": {**copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), "max_concurrent_trades": 15, "risk_reward_ratio": 1.5, "multi_timeframe_enabled": False, "market_mood_filter_enabled": False, "adx_filter_enabled": False, "btc_trend_filter_enabled": False, "news_filter_enabled": False}
 }
 
 # --- قواعد إدارة مخاطر المحفظة ---
