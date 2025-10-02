@@ -128,62 +128,66 @@ async def get_market_mood(bot_data):
 
 async def get_okx_markets(bot_data):
     settings = bot_data.settings
-    # --- [الإصلاح] --- تحديث قائمة الأسواق كل 5 دقائق لضمان بيانات حديثة
+    # --- [الإصلاح النهائي] --- طريقة جديدة أكثر موثوقية لجلب وفلترة الأسواق
     if time.time() - bot_data.last_markets_fetch > 300:
         try:
-            logger.info("Fetching and caching all OKX SPOT markets...")
-            all_markets_raw = await bot_data.exchange.fetch_markets()
-            # فلترة أولية للحصول على أزواج SPOT مقابل USDT فقط
+            logger.info("Force reloading and caching all OKX markets...")
+            # الخطوة 1: تحميل جميع الأسواق المتاحة بهيكلها الكامل
+            all_markets_data = await bot_data.exchange.load_markets(True)
+            
+            # الخطوة 2: فلترة هذه الأسواق لاختيار أزواج التداول الفوري (SPOT) مقابل USDT فقط
             bot_data.all_markets = [
-                m for m in all_markets_raw if m.get('spot', False) and m.get('quote', '') == 'USDT'
+                market for symbol, market in all_markets_data.items()
+                if market.get('spot', False) and market.get('quote', '') == 'USDT' and market.get('active', True)
             ]
             bot_data.last_markets_fetch = time.time()
             logger.info(f"Successfully cached {len(bot_data.all_markets)} SPOT USDT markets.")
         except Exception as e:
-            logger.error(f"Failed to fetch and cache markets: {e}")
-            return []
+            logger.error(f"CRITICAL: Failed to load markets structure from OKX: {e}", exc_info=True)
+            return [] # إرجاع قائمة فارغة عند الفشل الحرج
 
     if not bot_data.all_markets:
+        logger.warning("Market cache is empty, cannot proceed.")
         return []
         
     blacklist = settings.get('asset_blacklist', [])
     min_volume = settings.get('liquidity_filters', {}).get('min_quote_volume_24h_usd', 1000000)
 
-    # جلب Tickers للأسواق المفلترة للحصول على حجم التداول
+    # الخطوة 3: جلب بيانات Tickers للحصول على حجم التداول والأسعار
     symbols_to_fetch = [m['symbol'] for m in bot_data.all_markets]
     try:
+        # هذا الطلب قد يكون كبيرًا، OKX تتعامل معه بشكل جيد عادة
         tickers = await bot_data.exchange.fetch_tickers(symbols_to_fetch)
     except Exception as e:
         logger.error(f"Failed to fetch tickers for volume check: {e}")
+        # لا تتوقف هنا، قد تكون مشكلة مؤقتة. سنعتمد على الكاش القديم إن وجد
         return []
 
     valid_markets = []
     for market in bot_data.all_markets:
         symbol = market['symbol']
-        base_currency = market.get('base', '')
+        ticker_data = tickers.get(symbol)
         
+        # إذا لم نجد بيانات التيكر لهذا السوق، نتجاهله
+        if not ticker_data or ticker_data.get('quoteVolume') is None:
+            continue
+        
+        # تطبيق الفلاتر
+        base_currency = market.get('base', '')
+        quote_volume = ticker_data['quoteVolume']
+
         if base_currency in blacklist:
             continue
-            
-        ticker = tickers.get(symbol)
-        if not ticker:
-            continue
-
-        # التحقق من حجم التداول
-        quote_volume = ticker.get('quoteVolume', 0)
         if quote_volume < min_volume:
             continue
-
-        # التحقق من عدم وجود كلمات غير مرغوب فيها
         if any(k in symbol for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S', '2L', '2S', '4L', '4S', '5L', '5S']):
             continue
             
-        # إضافة السوق إلى القائمة الصالحة مع بيانات التيكر
-        valid_markets.append(ticker)
+        valid_markets.append(ticker_data)
 
     # ترتيب حسب حجم التداول واختيار الأعلى
     valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
     
     final_list = valid_markets[:settings.get('top_n_symbols_by_volume', 300)]
-    logger.info(f"Found {len(final_list)} markets matching liquidity and blacklist criteria.")
+    logger.info(f"Scan preparation: Found {len(final_list)} valid markets after all filters.")
     return final_list
