@@ -226,24 +226,36 @@ async def show_adaptive_intelligence_menu(update: Update, context: ContextTypes.
     await safe_edit_message(update.callback_query, "🧠 **إعدادات الذكاء التكيفي**", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = context.bot_data.settings; bool_format = lambda key, nk=None: "✅" if get_nested_value(s, nk) if nk else s.get(key) else "❌"
+    s = context.bot_data.settings
+
+    # دالة مساعدة مبسطة وصحيحة
+    def bool_format(val):
+        return "✅" if val else "❌"
+
     keyboard = [
+        # General Settings
         [InlineKeyboardButton(f"حجم الصفقة ($): {s.get('real_trade_size_usdt')}", callback_data="param_set_real_trade_size_usdt")],
         [InlineKeyboardButton(f"أقصى عدد للصفقات: {s.get('max_concurrent_trades')}", callback_data="param_set_max_concurrent_trades")],
         [InlineKeyboardButton(f"عمال الفحص: {s.get('worker_threads')}", callback_data="param_set_worker_threads")],
-        [InlineKeyboardButton("--- المخاطر ---", callback_data="noop")],
+
+        # Risk Settings
+        [InlineKeyboardButton("--- إعدادات المخاطر ---", callback_data="noop")],
         [InlineKeyboardButton(f"مضاعف ATR للوقف: {s.get('atr_sl_multiplier')}", callback_data="param_set_atr_sl_multiplier")],
         [InlineKeyboardButton(f"نسبة المخاطرة/العائد: {s.get('risk_reward_ratio')}", callback_data="param_set_risk_reward_ratio")],
-        [InlineKeyboardButton(f"الوقف المتحرك: {bool_format('trailing_sl_enabled')}", callback_data="param_toggle_trailing_sl_enabled")],
+        [InlineKeyboardButton(f"الوقف المتحرك: {bool_format(s.get('trailing_sl_enabled'))}", callback_data="param_toggle_trailing_sl_enabled")],
         [InlineKeyboardButton(f"تفعيل الوقف (%): {s.get('trailing_sl_activation_percent')}", callback_data="param_set_trailing_sl_activation_percent")],
         [InlineKeyboardButton(f"مسافة الوقف (%): {s.get('trailing_sl_callback_percent')}", callback_data="param_set_trailing_sl_callback_percent")],
-        [InlineKeyboardButton("--- الفلاتر ---", callback_data="noop")],
-        [InlineKeyboardButton(f"فلتر ADX: {bool_format('adx_filter_enabled')}", callback_data="param_toggle_adx_filter_enabled"), InlineKeyboardButton(f"مستوى ADX: {s.get('adx_filter_level')}", callback_data="param_set_adx_filter_level")],
+
+        # Filter Settings
+        [InlineKeyboardButton("--- إعدادات الفلاتر ---", callback_data="noop")],
+        [InlineKeyboardButton(f"فلتر ADX: {bool_format(s.get('adx_filter_enabled'))}", callback_data="param_toggle_adx_filter_enabled")],
+        [InlineKeyboardButton(f"مستوى ADX: {s.get('adx_filter_level')}", callback_data="param_set_adx_filter_level")],
         [InlineKeyboardButton(f"أقصى سبريد (%): {get_nested_value(s, ['spread_filter', 'max_spread_percent'])}", callback_data="param_set_spread_filter_max_spread_percent")],
         [InlineKeyboardButton(f"أدنى حجم ($): {get_nested_value(s, ['liquidity_filters', 'min_quote_volume_24h_usd'])}", callback_data="param_set_liquidity_filters_min_quote_volume_24h_usd")],
-        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]]
-    await safe_edit_message(update.callback_query, "🎛️ **تعديل المعايير المتقدمة**", reply_markup=InlineKeyboardMarkup(keyboard))
 
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
+    ]
+    await safe_edit_message(update.callback_query, "🎛️ **تعديل المعايير المتقدمة**", reply_markup=InlineKeyboardMarkup(keyboard))
 async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []; active_scanners = context.bot_data.settings.get('active_scanners', [])
     for key, name in STRATEGY_NAMES_AR.items(): keyboard.append([InlineKeyboardButton(f"{'✅' if key in active_scanners else '❌'} {name}", callback_data=f"scanner_toggle_{key}")])
