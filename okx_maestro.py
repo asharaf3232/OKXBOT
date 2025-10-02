@@ -2118,85 +2118,101 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif data.startswith("param_toggle_"): await handle_toggle_parameter(update, context)
         elif data.startswith("strategy_adjust_"): await handle_strategy_adjustment(update, context)
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
-
-# ==============================================================================
-# --- دوال التشغيل والإيقاف الرئيسية ---
-# ==============================================================================
 async def post_init(application: Application):
-    logger.info("Performing post-initialization setup for Intelligent Engine Bot...")
-    if not all([TELEGRAM_BOT_TOKEN, OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSWORD, TELEGRAM_CHAT_ID]):
-        logger.critical("FATAL: Missing one or more required environment variables."); return
+    """
+    [تم التعديل] دالة بدء التشغيل المحسنة مع معالجة أخطاء أفضل.
+    """
+    logger.info("Performing post-initialization setup for OKX Bot V7.1...")
 
-    # إضافة chat_id إلى بيانات البوت لاستخدامه في الوحدات الأخرى
+    # 1. التحقق من وجود المتغيرات الأساسية أولاً
+    required_vars = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'OKX_API_KEY', 'OKX_API_SECRET', 'OKX_API_PASSWORD']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    if missing_vars:
+        logger.critical(f"FATAL: Missing required environment variables: {', '.join(missing_vars)}")
+        # نوقف التطبيق إذا كانت المتغيرات الأساسية غير موجودة
+        raise RuntimeError("Bot cannot start due to missing environment variables.")
+
     application.bot_data['TELEGRAM_CHAT_ID'] = TELEGRAM_CHAT_ID
 
-    if NLTK_AVAILABLE:
-        try: nltk.data.find('sentiment/vader_lexicon.zip')
-        except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
-
-    bot_data.application = application
-
-    bot_data.exchange = ccxt.okx({
-        'apiKey': OKX_API_KEY,
-        'secret': OKX_API_SECRET,
-        'password': OKX_API_PASSWORD,
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'spot',
-            'timeout': 30000
-        }
-    })
-
+    # 2. تهيئة قاعدة البيانات أولاً وقبل كل شيء
+    # هذا يضمن أن واجهة تليجرام ستعمل حتى لو فشل الاتصال بالمنصة
     try:
+        await init_database()
+    except Exception as e:
+        logger.critical(f"FATAL: Database could not be initialized: {e}", exc_info=True)
+        raise RuntimeError("Bot cannot start due to database failure.")
+
+    # 3. محاولة الاتصال بالمنصة
+    try:
+        logger.info("Attempting to connect to OKX...")
+        bot_data.exchange = ccxt.okx({
+            'apiKey': OKX_API_KEY,
+            'secret': OKX_API_SECRET,
+            'password': OKX_API_PASSWORD,
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'spot',
+                'timeout': 30000
+            }
+        })
         await bot_data.exchange.load_markets()
         await bot_data.exchange.fetch_balance()
         logger.info("✅ Successfully connected to OKX Spot.")
     except Exception as e:
-        logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}", exc_info=True); return
+        # إذا فشل الاتصال، نطبع رسالة خطأ واضحة جداً ونتوقف
+        logger.critical(f"🔥 FATAL: Could not connect to OKX. The bot will not start.")
+        logger.critical("🔥 PLEASE CHECK YOUR OKX_API_KEY, OKX_API_SECRET, and OKX_API_PASSWORD.")
+        logger.critical(f"🔥 Detailed Error: {e}", exc_info=True)
+        # إرسال رسالة للمستخدم عبر تليجرام لإعلامه بالمشكلة
+        await application.bot.send_message(
+            TELEGRAM_CHAT_ID,
+            "🚨 **فشل تشغيل البوت** 🚨\n\nلم يتمكن البوت من الاتصال بمنصة OKX. "
+            "يرجى التحقق من مفاتيح الـ API وكلمة المرور الخاصة بها في متغيرات البيئة."
+        )
+        # نوقف البوت تماماً
+        raise RuntimeError("Failed to connect to OKX exchange.")
 
-    # --- تفعيل الرجل الحكيم ---
-    global wise_man
-    wise_man = WiseMan(exchange=bot_data.exchange, application=application, bot_data=bot_data)
-    # --------------------------
+    # --- إذا نجح كل ما سبق، نكمل الإعدادات ---
+    bot_data.application = application
 
-    # --- [تفعيل] تفعيل المحرك التطوري (العقل الذكي) ---  # <--- الإضافة الجديدة هنا
-    global smart_brain
-    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, application=application)
-    # ----------------------------------------------------
-
+    if NLTK_AVAILABLE:
+        try:
+            nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError:
+            logger.info("Downloading NLTK data...")
+            nltk.download('vader_lexicon', quiet=True)
+    
     load_settings()
-    await init_database()  # مع logging الجديد
 
+    # تفعيل الوحدات الأخرى
+    global wise_man, smart_brain
+    wise_man = WiseMan(exchange=bot_data.exchange, application=application)
+    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange)
+
+    # تشغيل مدير WebSocket
     bot_data.websocket_manager = OKXWebSocketManager(bot_data.exchange, application)
     asyncio.create_task(bot_data.websocket_manager.run())
 
     logger.info("WebSocket Manager: Performing initial sync for active trades...")
+    # قد تحتاج للانتظار قليلاً هنا قبل المزامنة لضمان بدء الاتصال
+    await asyncio.sleep(5) 
     await bot_data.websocket_manager.sync_subscriptions()
-    logger.info(f"WebSocket Manager: Initial sync complete.")
+    logger.info("WebSocket Manager: Initial sync complete.")
 
-    logger.info("Waiting 10s for WebSocket connections..."); await asyncio.sleep(10)
-
+    # جدولة المهام
     jq = application.job_queue
-    # المهام الأصلية
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
-
-    # --- جدولة مهام الرجل الحكيم ---
-    # --- [تعطيل] ---
-    #jq.run_repeating(wise_man.review_open_trades, interval=1800, first=45, name="wise_man_trade_review")
-    # مراجعة مخاطر المحفظة كل ساعة
     jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
-    # ---------------------------------
 
-    logger.info(f"All jobs scheduled. Wise Man is now fully active.")
-    try: 
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX V6.8 (الرجل الحكيم مفعل بالكامل) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
-    except Forbidden: 
-        logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- OKX Intelligent Engine Bot V6.8 (Wise Man Fully Activated) is now fully operational ---")
+    logger.info(f"All jobs scheduled. Wise Man is now fully active for OKX.")
+    await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX V7.1 (منطق البدء مُصحح) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    logger.info("--- OKX Intelligent Engine Bot V7.1 is now fully operational ---")
+
+
 
 async def post_shutdown(application: Application):
     if bot_data.exchange:
