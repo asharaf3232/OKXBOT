@@ -15,7 +15,9 @@ from zoneinfo import ZoneInfo
 import json
 
 # --- [الإصلاح] --- تم تصحيح الاستيراد وإضافة المنطقة الزمنية
-from settings_config import PORTFOLIO_RISK_RULES, SECTOR_MAP, STRATEGY_NAMES_AR, SCANNERS, TIMEFRAME
+# الكود الصحيح
+from settings_config import PORTFOLIO_RISK_RULES, SECTOR_MAP, STRATEGY_NAMES_AR, TIMEFRAME
+from strategy_scanners import SCANNERS
 from strategy_scanners import find_col
 
 logger = logging.getLogger(__name__)
