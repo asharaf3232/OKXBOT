@@ -18,7 +18,11 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 # --- استيراد الوحدات المخصصة ---
-from settings_config import STRATEGY_NAMES_AR, SETTINGS_PRESETS, SCANNERS, DEFAULT_SETTINGS
+# === السطر الصحيح الأول ===
+from settings_config import STRATEGY_NAMES_AR, SETTINGS_PRESETS, DEFAULT_SETTINGS
+
+# === السطر الصحيح الثاني ===
+from strategy_scanners import SCANNERS
 from ai_market_brain import get_fear_and_greed_index, get_latest_crypto_news, get_market_mood, get_okx_markets, analyze_sentiment_of_headlines
 
 # --- ثوابت ---
