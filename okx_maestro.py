@@ -1728,55 +1728,88 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
 
 
-async def post_init(application: Application):
-    logger.info("--- Bot post-initialization started ---")
-    if not all([TELEGRAM_BOT_TOKEN, OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRSE, TELEGRAM_CHAT_ID]):
-        logger.critical("FATAL: Missing critical environment variables."); return
 
+async def post_init(application: Application):
     bot_data.application = application
+    if not all([OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRASE, TELEGRAM_BOT_TOKEN]):
+        logger.critical("FATAL: Missing critical API keys."); return
+    if NLTK_AVAILABLE:
+        try: nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
     
     try:
-        config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRSE, 'enableRateLimit': True}
+        bot_data.redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        await bot_data.redis_client.ping()
+        logger.info("✅ Successfully connected to Redis server.")
+    except Exception as e:
+        logger.error(f"🔥 FATAL: Could not connect to Redis server: {e}")
+        bot_data.redis_client = None
+
+    try:
+        config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
-    except Exception as e:
-        logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}", exc_info=True); return
 
-    bot_data.wise_man = WiseMan(bot_data.exchange, application)
-    bot_data.smart_engine = EvolutionaryEngine(bot_data.exchange, application)
-    load_settings()
-    await init_database()
-    
-    # State reconciliation
-    logger.info("Reconciling trading state with OKX exchange...")
-    balance = await bot_data.exchange.fetch_balance()
-    owned_assets = {asset for asset, data in balance.items() if data.get('total', 0) > 0.00001}
-    async with aiosqlite.connect(DB_FILE) as conn:
-        active_trades = await (await conn.execute("SELECT id, symbol FROM trades WHERE status = 'active'")).fetchall()
-        for trade_id, symbol in active_trades:
-            base_currency = symbol.split('/')[0]
-            if base_currency not in owned_assets:
-                logger.warning(f"Trade #{trade_id} ({symbol}) is active in DB, but asset not found. Marking as manually closed.")
-                await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade_id,))
-        await conn.commit()
-    
-    bot_data.websocket_manager = UnifiedWebSocketManager(bot_data.exchange, application)
-    asyncio.create_task(bot_data.websocket_manager.run())
-    
+        logger.info("Reconciling SPOT trading state with OKX exchange...")
+        
+        balance = await bot_data.exchange.fetch_balance()
+        # [# <-- الإصلاح النهائي هنا]
+        owned_assets = {asset for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0.00001}
+        logger.info(f"Found {len(owned_assets)} assets with balance in the wallet.")
+
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            states_to_check = ('active', 'pending')
+            query = f"SELECT * FROM trades WHERE status IN {states_to_check}"
+            trades_in_db = await (await conn.execute(query)).fetchall()
+            logger.info(f"Found {len(trades_in_db)} active/pending trades in the local database to reconcile.")
+
+            for trade in trades_in_db:
+                base_currency = trade['symbol'].split('/')[0]
+                if base_currency not in owned_assets and trade['status'] == 'active':
+                    logger.warning(f"Trade #{trade['id']} for {trade['symbol']} is in DB, but asset balance is zero. Marking as manually closed.")
+                    await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade['id'],))
+            
+            await conn.commit()
+        logger.info("State reconciliation for SPOT complete.")
+
+    except Exception as e:
+        logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True)
+        return
+
+    await check_time_sync(ContextTypes.DEFAULT_TYPE(application=application))
+    bot_data.trade_guardian = TradeGuardian(application)
+    bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
+    bot_data.private_ws = PrivateWebSocketManager()
+    asyncio.create_task(bot_data.public_ws.run()); asyncio.create_task(bot_data.private_ws.run())
     logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
-    await bot_data.websocket_manager.sync_subscriptions()
+    await bot_data.trade_guardian.sync_subscriptions()
     
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    jq.run_repeating(supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="supervisor_job")
-    jq.run_repeating(maestro_job, interval=MAESTRO_INTERVAL_HOURS * 3600, first=60, name="maestro_job")
-    jq.run_repeating(bot_data.wise_man.review_open_trades, interval=WISE_MAN_TRADE_REVIEW_INTERVAL, name="wise_man_trade_review")
-    jq.run_repeating(bot_data.wise_man.review_portfolio_risk, interval=WISE_MAN_PORTFOLIO_REVIEW_INTERVAL, name="wise_man_portfolio_review")
-    jq.run_daily(bot_data.smart_engine.run_pattern_discovery, time=dt_time(hour=5, minute=0, tzinfo=EGYPT_TZ), name='pattern_discovery')
+    jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
+    jq.run_repeating(check_time_sync, interval=TIME_SYNC_INTERVAL_SECONDS, first=TIME_SYNC_INTERVAL_SECONDS, name="time_sync_job")
+    jq.run_repeating(critical_trade_monitor, interval=SUPERVISOR_INTERVAL_SECONDS * 2, first=SUPERVISOR_INTERVAL_SECONDS * 2, name="critical_trade_monitor")
+    jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
+    jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
+    jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
+    reviewer_interval = bot_data.settings.get('intelligent_reviewer_interval_minutes', 30) * 60
+    jq.run_repeating(intelligent_reviewer_job, interval=reviewer_interval, first=reviewer_interval, name="intelligent_reviewer_job")
+    jq.run_repeating(maestro_job, interval=MAESTRO_INTERVAL_HOURS * 3600, first=MAESTRO_INTERVAL_HOURS * 3600, name="maestro_job")
+
+    logger.info(f"Jobs scheduled. Daily report at 23:55. Strategy analysis every {STRATEGY_ANALYSIS_INTERVAL_SECONDS/3600} hours. Reviewer every {reviewer_interval/60} min. Maestro every {MAESTRO_INTERVAL_HOURS} hour.")
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار المايسترو - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
+    logger.info("--- OKX Sniper Bot is now fully operational ---")
+
+async def post_shutdown(application: Application):
+    if bot_data.exchange: await bot_data.exchange.close()
     
-    logger.info("✅ All periodic jobs have been scheduled.")
-    await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 OKX Maestro Pro v8.1 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
-    logger.info("--- Bot is now fully operational ---")
+    if bot_data.redis_client:
+        await bot_data.redis_client.close()
+        logger.info("Redis connection closed.")
+
+    logger.info("Bot has shut down.")
 
 def main():
     logger.info("--- Starting OKX Maestro Pro Bot ---")
