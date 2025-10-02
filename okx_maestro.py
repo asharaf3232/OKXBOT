@@ -1718,7 +1718,11 @@ async def show_trade_history_command(update: Update, context: ContextTypes.DEFAU
     await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; s = bot_data.settings
+    """
+    [تم الإصلاح] النسخة النهائية من تقرير التشخيص مع الطريقة الصحيحة لفحص اتصال WebSocket.
+    """
+    query = update.callback_query
+    s = bot_data.settings
     scan_info = bot_data.last_scan_info
     determine_active_preset()
     nltk_status = "متاحة ✅" if NLTK_AVAILABLE else "غير متاحة ❌"
@@ -1731,24 +1735,36 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     next_scan_time = scan_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S') if scan_job and scan_job[0].next_t else "N/A"
     db_size = f"{os.path.getsize(DB_FILE) / 1024:.2f} KB" if os.path.exists(DB_FILE) else "N/A"
     
-    # --- الجزء الجديد: تحقق وإعادة إنشاء DB إذا لزم ---
+    total_trades = 0
+    active_trades = 0
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
             active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
     except sqlite3.OperationalError as e:
         if "no such table: trades" in str(e):
-            logger.warning("DB table 'trades' missing. Re-initializing...")
+            logger.warning("DB table 'trades' missing in diagnostics. Re-initializing...")
             await init_database()
             total_trades = 0
             active_trades = 0
         else:
-            raise
+            logger.error(f"Diagnostics DB Error: {e}")
 
+    # --- [السطر الذي تم إصلاحه هنا] ---
+    # الكود القديم الخاطئ كان يستخدم: .closed
+    # الكود الجديد الصحيح يستخدم: .open
     ws_status = "غير متصل ❌"
-    if bot_data.websocket_manager and (bot_data.websocket_manager.public_ws and not bot_data.websocket_manager.public_ws.closed or bot_data.websocket_manager.private_ws and not bot_data.websocket_manager.private_ws.closed):
-        ws_status = "متصل ✅"
-
+    if bot_data.websocket_manager:
+        public_ws_open = bot_data.websocket_manager.public_ws and bot_data.websocket_manager.public_ws.open
+        private_ws_open = bot_data.websocket_manager.private_ws and bot_data.websocket_manager.private_ws.open
+        if public_ws_open and private_ws_open:
+            ws_status = "متصل ✅ (عام وخاص)"
+        elif public_ws_open:
+            ws_status = "متصل ✅ (عام فقط)"
+        elif private_ws_open:
+            ws_status = "متصل ✅ (خاص فقط)"
+    # --- [نهاية الإصلاح] ---
+    
     report = (
         f"🕵️‍♂️ *تقرير التشخيص الشامل*\n\n"
         f"تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -1775,18 +1791,6 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     )
     await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
-async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🧠 إعدادات الذكاء التكيفي", callback_data="settings_adaptive")],
-        [InlineKeyboardButton("🎛️ تعديل المعايير المتقدمة", callback_data="settings_params")],
-        [InlineKeyboardButton("🔭 تفعيل/تعطيل الماسحات", callback_data="settings_scanners")],
-        [InlineKeyboardButton("🗂️ أنماط جاهزة", callback_data="settings_presets")],
-        [InlineKeyboardButton("🚫 القائمة السوداء", callback_data="settings_blacklist"), InlineKeyboardButton("🗑️ إدارة البيانات", callback_data="settings_data")]
-    ]
-    message_text = "⚙️ *الإعدادات الرئيسية*\n\nاختر فئة الإعدادات التي تريد تعديلها."
-    target_message = update.message or update.callback_query.message
-    if update.callback_query: await safe_edit_message(update.callback_query, message_text, reply_markup=InlineKeyboardMarkup(keyboard))
-    else: await target_message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_adaptive_intelligence_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = bot_data.settings
