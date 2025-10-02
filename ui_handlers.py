@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🎨 ملف واجهة المستخدم v10.0 (النسخة النهائية الكاملة والصحيحة) 🎨 ---
+# --- 🎨 ملف واجهة المستخدم v10.1 (النسخة النهائية الكاملة والصحيحة) 🎨 ---
 # =======================================================================================
 
 import os
 import aiosqlite
 import asyncio
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import Counter
 from zoneinfo import ZoneInfo
 
@@ -171,16 +171,69 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     report = (f"🕵️‍♂️ *تقرير التشخيص*\n\n**🔬 آخر فحص:**\n- المدة: {scan_info.get('duration_seconds', 'N/A')} ثانية\n- العملات: {scan_info.get('checked_symbols', 'N/A')}\n\n**🔧 الإعدادات:**\n- النمط: {bot_data.active_preset_name}\n\n**🔩 العمليات:**\n- WebSocket: {ws_status}\n- DB: {db_size} | {total_trades} ({active_trades} نشطة)")
     keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]; await safe_edit_message(update.callback_query, report, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def send_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE): await context.bot.send_message(chat_id=update.effective_chat.id, text="تقرير اليوم تحت الإنشاء...")
-    
+async def send_daily_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer("🗓️ جاري إعداد تقرير اليوم...")
+        target_chat_id = query.message.chat_id
+    else:
+        target_chat_id = update.message.chat_id
+
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            yesterday = (datetime.now(EGYPT_TZ) - timedelta(days=1)).isoformat()
+            
+            trades_today = await (await conn.execute("SELECT pnl_usdt FROM trades WHERE timestamp >= ?", (yesterday,))).fetchall()
+            
+            if not trades_today:
+                report = "🗓️ **تقرير التداول اليومي**\n\nلم يتم إغلاق أي صفقات خلال الـ 24 ساعة الماضية."
+            else:
+                pnls = [t['pnl_usdt'] for t in trades_today if t['pnl_usdt'] is not None]
+                total_pnl = sum(pnls)
+                wins = [p for p in pnls if p >= 0]
+                losses = [p for p in pnls if p < 0]
+                win_rate = (len(wins) / len(pnls) * 100) if pnls else 0
+                
+                report = (
+                    f"🗓️ **تقرير التداول اليومي**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"**💰 صافي الربح/الخسارة:** `${total_pnl:+.2f}`\n"
+                    f"**📈 عدد الصفقات الرابحة:** {len(wins)}\n"
+                    f"**📉 عدد الصفقات الخاسرة:** {len(losses)}\n"
+                    f"**🎯 معدل النجاح:** {win_rate:.1f}%\n"
+                    f"**📊 إجمالي الصفقات:** {len(pnls)}"
+                )
+        if query:
+            keyboard = [[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]
+            await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await context.bot.send_message(chat_id=target_chat_id, text=report, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        error_message = f"🚨 فشل في إنشاء تقرير اليوم: {e}"
+        if query:
+            await safe_edit_message(query, error_message)
+        else:
+            await context.bot.send_message(chat_id=target_chat_id, text=error_message)
+            
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from okx_maestro import perform_scan
-    await (update.message or update.callback_query.message).reply_text("🔬 أمر فحص يدوي... قد يستغرق بعض الوقت.")
-    context.job_queue.run_once(lambda ctx: perform_scan(ctx), 1, name="manual_scan")
+    message_to_send = "🔬 **طلب فحص يدوي...**\nقد تستغرق العملية بضع دقائق. سيتم إرسال تقرير بالنتائج فور الانتهاء."
+    
+    if update.callback_query:
+        await safe_edit_message(update.callback_query, message_to_send)
+    else:
+        await update.message.reply_text(message_to_send, parse_mode=ParseMode.MARKDOWN)
+        
+    context.job_queue.run_once(lambda ctx: perform_scan(ctx, manual_run=True), 1, name="manual_scan")
+
 
 async def toggle_kill_switch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.bot_data.trading_enabled = not context.bot_data.trading_enabled; status = "استئناف التداول" if context.bot_data.trading_enabled else "إيقاف التداول"
-    await context.bot.send_message(chat_id=context.bot_data.TELEGRAM_CHAT_ID, text=f"**{status}**"); await show_dashboard_command(update, context)
+    context.bot_data.trading_enabled = not context.bot_data.trading_enabled
+    status = "✅ تم استئناف التداول الآلي." if context.bot_data.trading_enabled else "🚨 تم تفعيل مفتاح الإيقاف! لن يتم فتح صفقات جديدة."
+    await context.bot.send_message(chat_id=context.bot_data.TELEGRAM_CHAT_ID, text=f"**{status}**", parse_mode=ParseMode.MARKDOWN)
+    await show_dashboard_command(update, context)
 
 async def handle_manual_sell_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; trade_id = int(query.data.split('_')[-1])
@@ -191,7 +244,7 @@ async def handle_manual_sell_confirmation(update: Update, context: ContextTypes.
 async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; trade_id = int(query.data.split('_')[-1]); await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
     async with aiosqlite.connect(DB_FILE) as conn: conn.row_factory = aiosqlite.Row; trade = await (await conn.execute("SELECT * FROM trades WHERE id = ? AND status = 'active'", (trade_id,))).fetchone()
-    if not trade: await query.answer("لم يتم العثور على الصفقة.", show_alert=True); return
+    if not trade: await query.answer("لم يتم العثور على الصفقة أو أنها ليست نشطة.", show_alert=True); return
     try:
         ticker = await context.bot_data.exchange.fetch_ticker(trade['symbol'])
         await context.bot_data.guardian._close_trade(dict(trade), "إغلاق يدوي", ticker['last']); await query.answer("✅ تم إرسال أمر البيع بنجاح!")
@@ -228,6 +281,9 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(f"فلتر ADX: {bool_format(s.get('adx_filter_enabled'))}", callback_data="param_toggle_adx_filter_enabled"), InlineKeyboardButton(f"مستوى ADX: {s.get('adx_filter_level')}", callback_data="param_set_adx_filter_level")],
         [InlineKeyboardButton(f"أقصى سبريد (%): {get_nested_value(s, ['spread_filter', 'max_spread_percent'])}", callback_data="param_set_spread_filter_max_spread_percent")],
         [InlineKeyboardButton(f"أدنى حجم ($): {get_nested_value(s, ['liquidity_filters', 'min_quote_volume_24h_usd'])}", callback_data="param_set_liquidity_filters_min_quote_volume_24h_usd")],
+        [InlineKeyboardButton(f"أدنى RVol: {get_nested_value(s, ['liquidity_filters', 'min_rvol'])}", callback_data="param_set_liquidity_filters_min_rvol")],
+        [InlineKeyboardButton(f"حد رادار الحيتان ($): {s.get('whale_radar_threshold_usd')}", callback_data="param_set_whale_radar_threshold_usd")],
+        [InlineKeyboardButton(f"أدنى ATR (%): {get_nested_value(s, ['volatility_filters', 'min_atr_percent'])}", callback_data="param_set_volatility_filters_min_atr_percent")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]]
     await safe_edit_message(update.callback_query, "🎛️ **تعديل المعايير المتقدمة**", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -238,9 +294,10 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
-    # This now correctly uses the imported PRESET_NAMES_AR
+    active_preset = context.bot_data.active_preset_name
     for key, name in PRESET_NAMES_AR.items():
-        keyboard.append([InlineKeyboardButton(name, callback_data=f"preset_set_{key}")])
+        is_active = "🔹" if name == active_preset else ""
+        keyboard.append([InlineKeyboardButton(f"{is_active} {name}", callback_data=f"preset_set_{key}")])
     keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]); await safe_edit_message(update.callback_query, "اختر نمط إعدادات جاهز:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -259,9 +316,10 @@ async def handle_clear_data_execute(update: Update, context: ContextTypes.DEFAUL
     try:
         if os.path.exists(DB_FILE): os.remove(DB_FILE)
         from okx_maestro import init_database
-        await init_database(); await safe_edit_message(query, "✅ تم حذف البيانات بنجاح.")
-    except Exception as e: await safe_edit_message(query, f"❌ حدث خطأ: {e}")
-    await asyncio.sleep(2); await show_settings_menu(update, context)
+        await init_database(); await query.answer("✅ تم حذف البيانات بنجاح.", show_alert=True)
+    except Exception as e: await query.answer(f"❌ حدث خطأ: {e}", show_alert=True)
+    await asyncio.sleep(1); await show_data_management_menu(update, context)
+
 
 async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; action = query.data.replace("blacklist_", ""); context.user_data['blacklist_action'] = action
@@ -288,12 +346,15 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     with open(SETTINGS_FILE, 'w') as f: import json; json.dump(context.bot_data.settings, f, indent=4); await show_scanners_menu(update, context)
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; preset_key = query.data.replace("preset_set_", "")
+    query = update.callback_query
+    preset_key = query.data.replace("preset_set_", "")
+    preset_name_ar = PRESET_NAMES_AR.get(preset_key, preset_key)
+    
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
         context.bot_data.settings = copy.deepcopy(preset_settings)
         with open(SETTINGS_FILE, 'w') as f: import json; json.dump(context.bot_data.settings, f, indent=4)
-        context.bot_data.active_preset_name = preset_key
-        await query.answer(f"✅ تم تفعيل النمط: {preset_key}", show_alert=True)
+        context.bot_data.active_preset_name = preset_name_ar
+        await query.answer(f"✅ تم تفعيل النمط: {preset_name_ar}", show_alert=True)
     await show_presets_menu(update, context)
 
 async def handle_strategy_adjustment(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -303,6 +364,7 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
     user_input = update.message.text.strip(); settings = context.bot_data.settings
     def save():
         with open(SETTINGS_FILE, 'w') as f: import json; json.dump(settings, f, indent=4)
+        context.bot_data.active_preset_name = "مخصص" # Any manual change makes it a custom preset
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action'); symbol = user_input.upper().replace("/USDT", "")
         blacklist = settings.get('asset_blacklist', [])
@@ -314,11 +376,15 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             val = float(user_input)
             if val.is_integer(): val = int(val)
             keys = setting_key.split('_'); d = settings
-            for key in keys[:-1]: d = d[key]
+            for key in keys[:-1]:
+                if key not in d: d[key] = {}
+                d = d[key]
             d[keys[-1]] = val
             await update.message.reply_text(f"✅ تم تحديث `{setting_key.replace('_', ' ')}` إلى `{val}`.")
         except (ValueError, KeyError): await update.message.reply_text("❌ قيمة غير صالحة.")
-        finally: del context.user_data['setting_to_change']; save()
+        finally:
+            if 'setting_to_change' in context.user_data: del context.user_data['setting_to_change']
+            save()
 
 # =======================================================================================
 # --- معالجات الأوامر الرئيسية (Entry Points) - توضع في النهاية ---
