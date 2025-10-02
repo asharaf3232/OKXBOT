@@ -22,6 +22,7 @@ import aiosqlite
 import pandas as pd
 import ccxt.async_support as ccxt
 from telegram import Update, ReplyKeyboardMarkup
+from telegram.constants import ParseMode # <--- أضف هذا السطر
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from dotenv import load_dotenv
 import websockets
