@@ -1,19 +1,44 @@
-script: |
-  # اذهب إلى مجلد البوت
-  cd /root/bots/OKXBOT
+# اسم الـ Workflow
+name: Deploy Bot to VPS
 
-  # تأكد من أنك تعمل كمستخدم لديه الصلاحيات المناسبة
-  git config --global --add safe.directory /root/bots/OKXBOT
+# المشغلات: يعمل عند التحديث أو يدويًا
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
 
-  # احصل على آخر التحديثات من GitHub
-  git fetch --all
+# تعريف المهام (Jobs)
+jobs:
+  deploy:
+    # بيئة التشغيل
+    runs-on: ubuntu-latest
+    
+    # خطوات التنفيذ
+    steps:
+    - name: SSH and Deploy
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.VPS_SSH_HOST }}
+        username: ${{ secrets.VPS_SSH_USERNAME }}
+        key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        
+        # السكريبت المحسّن والكامل الذي سيتم تنفيذه على السيرفر
+        script: |
+          # اذهب إلى مجلد البوت
+          cd /root/bots/OKXBOT
 
-  # تجاهل أي تعديلات محلية وافرض نسخة GitHub (أكثر قوة من git pull)
-  git reset --hard origin/main
+          # (اختياري ولكن موصى به) أمر لتجنب مشاكل صلاحيات git
+          git config --global --add safe.directory /root/bots/OKXBOT
 
-  # فعّل البيئة الافتراضية بطريقة أكثر توافقية
-  # واستدعِ pip مباشرة لضمان استخدام النسخة الصحيحة
-  venv/bin/pip install -r requirements.txt
+          # احصل على آخر التحديثات من GitHub
+          git fetch --all
 
-  # أعد تشغيل البوت بالتحديثات الجديدة
-  pm2 reload OKX_Maestro_Bot
+          # تجاهل أي تعديلات محلية وافرض نسخة GitHub (أكثر قوة من git pull)
+          git reset --hard origin/main
+
+          # فعّل البيئة الافتراضية بطريقة أكثر توافقية وثبّت المكتبات
+          venv/bin/pip install -r requirements.txt
+
+          # أعد تشغيل البوت بالتحديثات الجديدة
+          pm2 reload OKX_Maestro_Bot
