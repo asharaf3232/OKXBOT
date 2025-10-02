@@ -19,6 +19,14 @@ from telegram.constants import ParseMode
 from telegram.error import Forbidden
 from dotenv import load_dotenv
 
+# --- استيراد الوحدات المنفصلة (هيكلك الصحيح) ---
+# 💡 التعديل هنا: سنقوم باستيراد SCANNERS و STRATEGY_NAMES_AR مباشرة فقط
+from strategy_scanners import SCANNERS, filter_whale_radar
+from ai_market_brain import get_market_regime, get_market_mood, get_okx_markets
+from smart_engine import EvolutionaryEngine
+import ui_handlers
+from wise_maestro_guardian import TradeGuardian, PublicWebSocketManager, PrivateWebSocketManager
+
 # --- جلب المتغيرات ---
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -33,6 +41,81 @@ SETTINGS_FILE = 'wise_maestro_okx_settings.json'
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger("OKX_MAESTRO")
+
+# =======================================================================================
+# --- ⚙️ Core Configuration Defaults v2.0 (Corrected and Completed) ⚙️ ---
+# 💡 الحل: وضع إعدادات DEFAULT_SETTINGS هنا مباشرةً
+# =======================================================================================
+
+DEFAULT_SETTINGS = {
+    "real_trade_size_usdt": 15.0,
+    "max_concurrent_trades": 5,
+    "top_n_symbols_by_volume": 300,
+    "worker_threads": 10,
+    "atr_sl_multiplier": 2.5,
+    "risk_reward_ratio": 2.0,
+    "trailing_sl_enabled": True,
+    "trailing_sl_activation_percent": 2.0,
+    "trailing_sl_callback_percent": 1.5,
+    "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "whale_radar", "rsi_divergence", "supertrend_pullback", "bollinger_reversal"],
+    "market_mood_filter_enabled": True,
+    "fear_and_greed_threshold": 30,
+    "adx_filter_enabled": True,
+    "adx_filter_level": 25,
+    "btc_trend_filter_enabled": True,
+    "news_filter_enabled": True,
+    "asset_blacklist": ["USDC", "DAI", "TUSD", "FDUSD", "USDD", "PYUSD", "USDT", "BNB", "BTC", "ETH", "OKB"],
+    "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "min_rvol": 1.5},
+    "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.8},
+    "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": True},
+    "spread_filter": {"max_spread_percent": 0.5},
+    "volume_filter_multiplier": 2.0,
+    "whale_radar_threshold_usd": 30000.0,
+    "close_retries": 3,
+    "incremental_notifications_enabled": True,
+    "incremental_notification_percent": 2.0,
+    "adaptive_intelligence_enabled": True,
+    "dynamic_trade_sizing_enabled": True,
+    "strategy_proposal_enabled": True,
+    "strategy_analysis_min_trades": 10,
+    "strategy_deactivation_threshold_wr": 45.0,
+    "dynamic_sizing_max_increase_pct": 25.0,
+    "dynamic_sizing_max_decrease_pct": 50.0,
+    "intelligent_reviewer_enabled": True,
+    "momentum_scalp_mode_enabled": False,
+    "momentum_scalp_target_percent": 0.5,
+    "multi_timeframe_confluence_enabled": True,
+    "maestro_mode_enabled": True,
+    "portfolio_risk_rules": {
+        "max_asset_concentration_pct": 30.0,
+        "max_sector_concentration_pct": 50.0,
+    }
+}
+# --- أسماء الاستراتيجيات ---
+STRATEGY_NAMES_AR = {
+    "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
+    "support_rebound": "ارتداد الدعم", "sniper_pro": "القناص المحترف", "whale_radar": "رادار الحيتان",
+    "rsi_divergence": "دايفرجنس RSI", "supertrend_pullback": "انعكاس سوبرترند",
+    "bollinger_reversal": "انعكاس بولينجر"
+}
+
+# --- أنماط الإعدادات الجاهزة ---
+PRESET_NAMES_AR = {
+    "professional": "احترافي", "strict": "متشدد", "lenient": "متساهل",
+    "very_lenient": "فائق التساهل", "bold_heart": "القلب الجريء"
+}
+# --- قوالب الإعدادات الجاهزة (Presets) ---
+SETTINGS_PRESETS = {
+    "professional": copy.deepcopy(DEFAULT_SETTINGS),
+    "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
+    "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
+    "very_lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 12, "adx_filter_enabled": False, "market_mood_filter_enabled": False, "trend_filters": {"enabled": False}, "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0}},
+    "bold_heart": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 15, "risk_reward_ratio": 1.5, "multi_timeframe_enabled": False, "market_mood_filter_enabled": False, "adx_filter_enabled": False, "btc_trend_filter_enabled": False, "news_filter_enabled": False}
+}
+
+# =======================================================================================
+# --- نهاية قسم الإعدادات ---
+# =======================================================================================
 
 # --- الحالة العامة للبوت ---
 class BotState:
@@ -91,17 +174,14 @@ async def worker_batch(queue, signals_list, errors_list):
             market, ohlcv = item['market'], item['ohlcv']
             symbol = market['symbol']
             
-            # 💡 التعديل الرئيسي: إضافة منطق تجهيز البيانات
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df = df.set_index('timestamp').sort_index()
-            # -----------------------------------------------
             
             if len(df) < 50:
                 queue.task_done(); continue
             
             # --- سلسلة الفلاتر ---
-            # فلتر السيولة والتقلب والاتجاه
             last_close = df['close'].iloc[-2]
             df.ta.atr(length=14, append=True)
             atr_col = next((col for col in df.columns if col.startswith('ATRr_')), None)
@@ -109,15 +189,11 @@ async def worker_batch(queue, signals_list, errors_list):
             if atr_percent < settings['volatility_filters']['min_atr_percent']:
                 queue.task_done(); continue
 
-            # ... يمكنك إضافة باقي الفلاتر هنا بنفس الطريقة (RVOL, EMA, etc) ...
-
-            # --- تشغيل الماسحات ---
             confirmed_reasons = []
             for name in settings['active_scanners']:
                 if name == 'whale_radar': continue
                 if not (strategy_func := SCANNERS.get(name)): continue
                 
-                # وسيطات فارغة مبدئياً
                 rvol = 0
                 adx_value = 0
                 
@@ -128,7 +204,6 @@ async def worker_batch(queue, signals_list, errors_list):
                 result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
                 if result: confirmed_reasons.append(result['reason'])
 
-            # --- تجميع الإشارة ---
             if confirmed_reasons:
                 reason_str = ' + '.join(set(confirmed_reasons))
                 entry_price = last_close
@@ -251,11 +326,9 @@ async def post_init(application: Application):
     asyncio.create_task(bot_data.private_ws.run())
     logger.info("✅ Step 4/5: WebSockets initiated.")
 
-    # 💡 التعديل الرئيسي: إضافة تأخير لضمان استقرار اتصال الويب سوكت
     logger.info("Waiting 5s for WebSocket connections to establish before syncing...")
     await asyncio.sleep(5)
     await bot_data.guardian.sync_subscriptions()
-    # ----------------------------------------------------
     
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
@@ -277,9 +350,7 @@ async def post_shutdown(application: Application):
 
 def main():
     logger.info("--- Starting Wise Maestro Bot ---")
-    # 💡 التعديل الرئيسي: نقل استدعاء load_settings() إلى هنا
     load_settings()
-    # -----------------------------------------------
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
