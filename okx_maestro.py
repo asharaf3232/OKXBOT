@@ -22,7 +22,6 @@ import aiosqlite
 import pandas as pd
 import ccxt.async_support as ccxt
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.constants import ParseMode # <--- أضف هذا السطر
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from dotenv import load_dotenv
 import websockets
@@ -429,14 +428,12 @@ def main():
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
-    
+
     application.bot_data = bot_data
-    
+
+    # --- تأكد من وجود هذه الأسطر الثلاثة كاملة وغير معطلة ---
     application.add_handler(CommandHandler("start", ui_handlers.start_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ui_handlers.universal_text_handler))
-    application.add_handler(CallbackQueryHandler(ui_handlers.button_callback_handler))
-    
-    application.run_polling()
+    application.add_handler(CallbackQueryHandler(ui_handlers.button_callback_handler)) # <-- هذا هو السطر الحاسم
 
-if __name__ == '__main__':
-    main()
+    application.run_polling()
