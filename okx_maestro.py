@@ -26,7 +26,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from dotenv import load_dotenv
 import websockets
 import websockets.exceptions
-import redis.async_io as redis
+import redis.asyncio as redis
 import hmac
 import base64
 
