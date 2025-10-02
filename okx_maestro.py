@@ -20,6 +20,10 @@
 #   ✅ [التعديل السهل] تحديث فلاتر السوق لـ MIN_NOTIONAL (استخدام 'cost' limits في OKX).
 #   ✅ [التعديل الصعب] إعادة كتابة OKXWebSocketManager كاملاً مع مصادقة واشتراكات مخصصة.
 #
+# --- سجل الإصلاحات الجديدة ---
+#   ✅ [إصلاح DB] تحسين init_database مع logging وإعادة إنشاء الجدول إذا فشل.
+#   ✅ [إصلاح Diagnostics] إضافة try-except في show_diagnostics_command لتجنب الانهيار.
+#
 # =======================================================================================
 
 # --- المكتبات الأساسية ---
@@ -39,6 +43,7 @@ import aiosqlite
 import hmac
 import hashlib
 import base64
+import sqlite3  # إضافة للـ except في diagnostics
 
 # --- مكتبات التحليل والتداول ---
 import pandas as pd
@@ -225,19 +230,39 @@ def save_settings():
 
 async def init_database():
     try:
+        logger.info("Starting DB init...")
         async with aiosqlite.connect(DB_FILE) as conn:
             await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0, trade_weight REAL DEFAULT 1.0)')
+            await conn.commit()
             cursor = await conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in await cursor.fetchall()]
-            if 'signal_strength' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
-            if 'close_retries' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN close_retries INTEGER DEFAULT 0")
-            if 'last_profit_notification_price' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN last_profit_notification_price REAL DEFAULT 0")
-            if 'trade_weight' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN trade_weight REAL DEFAULT 1.0")
-            if 'trailing_sl_active' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN trailing_sl_active BOOLEAN DEFAULT 0")
-            if 'highest_price' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN highest_price REAL DEFAULT 0")
+            # إضافة الأعمدة المفقودة (مع logging)
+            added_columns = []
+            if 'signal_strength' not in columns:
+                await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
+                added_columns.append('signal_strength')
+            if 'close_retries' not in columns:
+                await conn.execute("ALTER TABLE trades ADD COLUMN close_retries INTEGER DEFAULT 0")
+                added_columns.append('close_retries')
+            if 'last_profit_notification_price' not in columns:
+                await conn.execute("ALTER TABLE trades ADD COLUMN last_profit_notification_price REAL DEFAULT 0")
+                added_columns.append('last_profit_notification_price')
+            if 'trade_weight' not in columns:
+                await conn.execute("ALTER TABLE trades ADD COLUMN trade_weight REAL DEFAULT 1.0")
+                added_columns.append('trade_weight')
+            if 'trailing_sl_active' not in columns:
+                await conn.execute("ALTER TABLE trades ADD COLUMN trailing_sl_active BOOLEAN DEFAULT 0")
+                added_columns.append('trailing_sl_active')
+            if 'highest_price' not in columns:
+                await conn.execute("ALTER TABLE trades ADD COLUMN highest_price REAL DEFAULT 0")
+                added_columns.append('highest_price')
             await conn.commit()
-        logger.info("Adaptive database initialized successfully.")
-    except Exception as e: logger.critical(f"Database initialization failed: {e}")
+            if added_columns:
+                logger.info(f"Added missing columns to trades table: {', '.join(added_columns)}")
+        logger.info("✅ Adaptive database initialized successfully.")
+    except Exception as e:
+        logger.critical(f"❌ Database initialization failed: {e}", exc_info=True)
+        raise  # لإيقاف التشغيل إذا فشل الإنشاء الأساسي
 
 async def log_pending_trade_to_db(signal, buy_order):
     try:
@@ -1256,7 +1281,7 @@ class OKXWebSocketManager:
             # فحص الحد الأدنى لقيمة الصفقة (تكييف مع OKX)
             min_notional_str = market.get('limits', {}).get('notional', {}).get('min') or market.get('limits', {}).get('cost', {}).get('min')
             if min_notional_str and (quantity_to_sell * close_price) < float(min_notional_str):
-                raise ccccxt.InvalidOrder(f"Total trade value is below minimum notional. Value: {quantity_to_sell * close_price}, Min Required: {min_notional_str}")
+                raise ccxt.InvalidOrder(f"Total trade value is below minimum notional. Value: {quantity_to_sell * close_price}, Min Required: {min_notional_str}")
             # --- [نهاية الإضافة] ---
 
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
@@ -1705,9 +1730,20 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     scan_job = context.job_queue.get_jobs_by_name("perform_scan")
     next_scan_time = scan_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S') if scan_job and scan_job[0].next_t else "N/A"
     db_size = f"{os.path.getsize(DB_FILE) / 1024:.2f} KB" if os.path.exists(DB_FILE) else "N/A"
-    async with aiosqlite.connect(DB_FILE) as conn:
-        total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
-        active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+    
+    # --- الجزء الجديد: تحقق وإعادة إنشاء DB إذا لزم ---
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
+            active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+    except sqlite3.OperationalError as e:
+        if "no such table: trades" in str(e):
+            logger.warning("DB table 'trades' missing. Re-initializing...")
+            await init_database()
+            total_trades = 0
+            active_trades = 0
+        else:
+            raise
 
     ws_status = "غير متصل ❌"
     if bot_data.websocket_manager and (bot_data.websocket_manager.public_ws and not bot_data.websocket_manager.public_ws.closed or bot_data.websocket_manager.private_ws and not bot_data.websocket_manager.private_ws.closed):
@@ -2129,7 +2165,7 @@ async def post_init(application: Application):
     # ----------------------------------------------------
 
     load_settings()
-    await init_database()
+    await init_database()  # مع logging الجديد
 
     bot_data.websocket_manager = OKXWebSocketManager(bot_data.exchange, application)
     asyncio.create_task(bot_data.websocket_manager.run())
