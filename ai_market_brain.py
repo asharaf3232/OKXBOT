@@ -30,18 +30,29 @@ logger = logging.getLogger(__name__)
 def analyze_sentiment_of_headlines(headlines):
     """يحلل مشاعر العناوين الإخبارية."""
     if not headlines or not NLTK_AVAILABLE: return "N/A", 0.0
-    sia = SentimentIntensityAnalyzer()
-    score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
-    if score > 0.15: mood = "إيجابية"
-    elif score < -0.15: mood = "سلبية"
-    else: mood = "محايدة"
-    return mood, score
+    try:
+        sia = SentimentIntensityAnalyzer()
+        score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
+        if score > 0.15: mood = "إيجابية"
+        elif score < -0.15: mood = "سلبية"
+        else: mood = "محايدة"
+        return mood, score
+    except Exception as e:
+        logger.warning(f"Sentiment analysis failed: {e}. NLTK Vader corpus might be missing. Run: python -m nltk.downloader vader_lexicon")
+        return "N/A", 0.0
 
 def get_latest_crypto_news(limit=15):
     """يجلب آخر عناوين أخبار العملات المشفرة."""
     urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
-    headlines = [entry.title for url in urls for entry in feedparser.parse(url).entries[:7]]
+    headlines = []
+    for url in urls:
+        try:
+            feed = feedparser.parse(url)
+            headlines.extend(entry.title for entry in feed.entries[:7])
+        except Exception as e:
+            logger.warning(f"Could not fetch news from {url}: {e}")
     return list(set(headlines))[:limit]
+
 
 async def get_fear_and_greed_index():
     """يجلب مؤشر الخوف والطمع."""
@@ -117,28 +128,62 @@ async def get_market_mood(bot_data):
 
 async def get_okx_markets(bot_data):
     settings = bot_data.settings
+    # --- [الإصلاح] --- تحديث قائمة الأسواق كل 5 دقائق لضمان بيانات حديثة
     if time.time() - bot_data.last_markets_fetch > 300:
         try:
-            logger.info("Fetching and caching all OKX markets...")
-            all_tickers = await bot_data.exchange.fetch_tickers()
-            bot_data.all_markets = list(all_tickers.values())
+            logger.info("Fetching and caching all OKX SPOT markets...")
+            all_markets_raw = await bot_data.exchange.fetch_markets()
+            # فلترة أولية للحصول على أزواج SPOT مقابل USDT فقط
+            bot_data.all_markets = [
+                m for m in all_markets_raw if m.get('spot', False) and m.get('quote', '') == 'USDT'
+            ]
             bot_data.last_markets_fetch = time.time()
+            logger.info(f"Successfully cached {len(bot_data.all_markets)} SPOT USDT markets.")
         except Exception as e:
-            logger.error(f"Failed to fetch all markets: {e}")
+            logger.error(f"Failed to fetch and cache markets: {e}")
             return []
 
+    if not bot_data.all_markets:
+        return []
+        
     blacklist = settings.get('asset_blacklist', [])
     min_volume = settings.get('liquidity_filters', {}).get('min_quote_volume_24h_usd', 1000000)
 
-    valid_markets = [
-        t for t in bot_data.all_markets if 
-        t.get('symbol') and 
-        t['symbol'].endswith('/USDT') and 
-        t['symbol'].split('/')[0] not in blacklist and 
-        t.get('quoteVolume', 0) > min_volume and 
-        t.get('active', True) and 
-        not any(k in t['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S'])
-    ]
+    # جلب Tickers للأسواق المفلترة للحصول على حجم التداول
+    symbols_to_fetch = [m['symbol'] for m in bot_data.all_markets]
+    try:
+        tickers = await bot_data.exchange.fetch_tickers(symbols_to_fetch)
+    except Exception as e:
+        logger.error(f"Failed to fetch tickers for volume check: {e}")
+        return []
 
+    valid_markets = []
+    for market in bot_data.all_markets:
+        symbol = market['symbol']
+        base_currency = market.get('base', '')
+        
+        if base_currency in blacklist:
+            continue
+            
+        ticker = tickers.get(symbol)
+        if not ticker:
+            continue
+
+        # التحقق من حجم التداول
+        quote_volume = ticker.get('quoteVolume', 0)
+        if quote_volume < min_volume:
+            continue
+
+        # التحقق من عدم وجود كلمات غير مرغوب فيها
+        if any(k in symbol for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S', '2L', '2S', '4L', '4S', '5L', '5S']):
+            continue
+            
+        # إضافة السوق إلى القائمة الصالحة مع بيانات التيكر
+        valid_markets.append(ticker)
+
+    # ترتيب حسب حجم التداول واختيار الأعلى
     valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
-    return valid_markets[:settings.get('top_n_symbols_by_volume', 300)]
+    
+    final_list = valid_markets[:settings.get('top_n_symbols_by_volume', 300)]
+    logger.info(f"Found {len(final_list)} markets matching liquidity and blacklist criteria.")
+    return final_list
