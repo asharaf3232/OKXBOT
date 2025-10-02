@@ -2186,9 +2186,8 @@ async def post_init(application: Application):
 
     # تفعيل الوحدات الأخرى
     global wise_man, smart_brain
-    wise_man = WiseMan(exchange=bot_data.exchange, application=application)
-    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange)
-
+    wise_man = WiseMan(exchange=bot_data.exchange, application=application, bot_data_ref=bot_data, db_file=DB_FILE)
+    smart_brain = EvolutionaryEngine(exchange=bot_data.exchange, db_file=DB_FILE)
     # تشغيل مدير WebSocket
     bot_data.websocket_manager = OKXWebSocketManager(bot_data.exchange, application)
     asyncio.create_task(bot_data.websocket_manager.run())
