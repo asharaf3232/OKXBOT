@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Wise Maestro Bot - Final Fusion v8.0 (OKX Edition) 🚀 ---
+# --- 🚀 Wise Maestro Bot - Final Fusion v8.1 (OKX Edition) 🚀 ---
 # =======================================================================================
 import os
 import logging
@@ -13,20 +13,20 @@ from zoneinfo import ZoneInfo
 from collections import defaultdict
 import aiosqlite
 import pandas as pd
+import pandas_ta as ta
 import ccxt.async_support as ccxt
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.constants import ParseMode # <-- الإصلاح هنا
+from telegram.constants import ParseMode
 from dotenv import load_dotenv
 import websockets
 import websockets.exceptions
-import redis.asyncio as redis # <-- الإصلاح هنا
 import hmac
 import base64
 
 # --- استيراد الوحدات المنفصلة ---
 from settings_config import *
-from strategy_scanners import SCANNERS, find_col, filter_whale_radar
+from strategy_scanners import SCANNERS
 from ai_market_brain import get_market_regime, get_market_mood, get_okx_markets
 from smart_engine import EvolutionaryEngine
 import ui_handlers 
@@ -40,7 +40,6 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 OKX_API_KEY = os.getenv('OKX_API_KEY')
 OKX_API_SECRET = os.getenv('OKX_API_SECRET')
 OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE')
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 
 # --- إعدادات أساسية ---
 DB_FILE = 'wise_maestro_okx.db'
@@ -64,35 +63,40 @@ class BotState:
         self.smart_brain = None
         self.TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID
         self.trade_management_lock = asyncio.Lock()
+        # لإ кэширования рынков
+        self.all_markets = []
+        self.last_markets_fetch = 0
+        self.strategy_performance = {}
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
 
-# (بقية الكود الخاص بالويب سوكت والوظائف المساعدة كما هو - لا داعي لتغييره)
-# ...
 # --- OKX Specific WebSocket ---
 class PublicWebSocketManager:
     def __init__(self, handler_coro): 
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
         self.handler = handler_coro
         self.subscriptions = set()
+        self.websocket = None
 
     async def _send_op(self, op, symbols):
-        if not symbols or not hasattr(self, 'websocket') or not self.websocket.open: return
+        if not symbols or not self.websocket or not self.websocket.open: return
         try: await self.websocket.send(json.dumps({"op": op, "args": [{"channel": "tickers", "instId": s.replace('/', '-')} for s in symbols]}))
         except websockets.exceptions.ConnectionClosed: pass
 
     async def subscribe(self, symbols):
-        new = [s for s in symbols if s not in self.subscriptions]
-        if new:
-            await self._send_op('subscribe', new)
-            self.subscriptions.update(new)
+        new_symbols = [s for s in symbols if s not in self.subscriptions]
+        if new_symbols:
+            logger.info(f"[Public WS] Subscribing to: {new_symbols}")
+            await self._send_op('subscribe', new_symbols)
+            self.subscriptions.update(new_symbols)
 
     async def unsubscribe(self, symbols):
-        old = [s for s in symbols if s in self.subscriptions]
-        if old:
-            await self._send_op('unsubscribe', old)
-            [self.subscriptions.discard(s) for s in old]
+        old_symbols = [s for s in symbols if s in self.subscriptions]
+        if old_symbols:
+            logger.info(f"[Public WS] Unsubscribing from: {old_symbols}")
+            await self._send_op('unsubscribe', old_symbols)
+            for s in old_symbols: self.subscriptions.discard(s)
 
     async def run(self):
         while True:
@@ -113,21 +117,32 @@ class PublicWebSocketManager:
                                 await self.handler(standard_ticker)
             except Exception as e:
                 logger.error(f"OKX Public WS failed: {e}. Retrying in 10s...")
+                self.websocket = None
                 await asyncio.sleep(10)
 
 class PrivateWebSocketManager:
-    def __init__(self): self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"
+    def __init__(self): 
+        self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"
+        self.websocket = None
+        
     def _get_auth_args(self):
         timestamp = str(time.time()); message = timestamp + 'GET' + '/users/self/verify'
         mac = hmac.new(bytes(OKX_API_SECRET, 'utf8'), bytes(message, 'utf8'), 'sha256')
         sign = base64.b64encode(mac.digest()).decode()
         return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRASE, "timestamp": timestamp, "sign": sign}]
+
     async def _message_handler(self, msg):
         if msg == 'ping': await self.websocket.send('pong'); return
         data = json.loads(msg)
-        if data.get('arg', {}).get('channel') == 'orders':
-            for order in data.get('data', []):
-                if order.get('state') == 'filled' and order.get('side') == 'buy': await bot_data.guardian.activate_trade(order['ordId'], order['instId'].replace('-', '/'))
+        if data.get('event') == 'error':
+             logger.error(f"[Private WS] Error: {data.get('msg')}")
+             return
+        if data.get('arg', {}).get('channel') == 'orders' and 'data' in data:
+            for order_data in data.get('data', []):
+                if order_data.get('state') == 'filled' and order_data.get('side') == 'buy': 
+                    if hasattr(bot_data, 'activate_trade'): # Ensure function exists
+                        await bot_data.activate_trade(order_data['ordId'], order_data['instId'].replace('-', '/'))
+
     async def run(self):
         while True:
             try:
@@ -142,15 +157,18 @@ class PrivateWebSocketManager:
                     else: raise ConnectionAbortedError(f"Auth failed: {login_response}")
             except Exception as e:
                 logger.error(f"OKX Private WS failed: {e}. Retrying in 10s...")
+                self.websocket = None
                 await asyncio.sleep(10)
 
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f: bot_data.settings = json.load(f)
+            with open(SETTINGS_FILE, 'r') as f: 
+                user_settings = json.load(f)
+                bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
+                bot_data.settings.update(user_settings) # Merge to keep new defaults
         else: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
     except Exception: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
-    for key, value in DEFAULT_SETTINGS.items(): bot_data.settings.setdefault(key, value)
     with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4); logger.info("Settings loaded successfully.")
 
 async def init_database():
@@ -160,13 +178,125 @@ async def init_database():
             await conn.commit(); logger.info("Database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
 
-async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    # ... (This long function remains the same)
-    pass
+async def perform_scan(context: ContextTypes.DEFAULT_TYPE, manual_run=False):
+    if scan_lock.locked():
+        logger.info("Scan is already in progress. Skipping this run.")
+        if manual_run:
+            await context.bot.send_message(TELEGRAM_CHAT_ID, "⚠️ **يوجد فحص آخر قيد التنفيذ. يرجى الانتظار.**")
+        return
+
+    async with scan_lock:
+        if not bot_data.trading_enabled:
+            logger.warning("Trading is disabled via kill switch. Scan aborted.")
+            if manual_run:
+                await context.bot.send_message(TELEGRAM_CHAT_ID, "🚨 **الفحص اليدوي ملغي. مفتاح الإيقاف مفعل.**")
+            return
+
+        logger.info("🚀 Starting new market scan...")
+        if manual_run:
+            await context.bot.send_message(TELEGRAM_CHAT_ID, "🔬 **بدء فحص يدوي للسوق...**", parse_mode=ParseMode.MARKDOWN)
+        
+        start_time = time.time()
+        found_opportunities = []
+        scanned_symbols_count = 0
+
+        try:
+            all_markets = await get_okx_markets(bot_data)
+            if not all_markets:
+                if manual_run: await context.bot.send_message(TELEGRAM_CHAT_ID, "⚠️ تعذر جلب بيانات الأسواق من OKX.")
+                return
+
+            market_mood = await get_market_mood(bot_data)
+            if market_mood["mood"] != "POSITIVE":
+                reason = market_mood['reason']
+                logger.info(f"Scan paused due to market mood: {reason}")
+                if manual_run: await context.bot.send_message(TELEGRAM_CHAT_ID, f"⏸️ **إيقاف البحث:** {reason}")
+                return
+
+            symbols_to_scan = [m['symbol'] for m in all_markets]
+            scanned_symbols_count = len(symbols_to_scan)
+            
+            # This is a simplified sequential scan. For higher performance, this should be parallelized.
+            for symbol in symbols_to_scan:
+                try:
+                    ohlcv = await bot_data.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+                    if not ohlcv or len(ohlcv) < 50: continue
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    
+                    for scanner_name in bot_data.settings.get('active_scanners', []):
+                        if not (scanner_func := SCANNERS.get(scanner_name)): continue
+
+                        # Simple placeholder for rvol and adx for now
+                        df.ta.adx(append=True)
+                        adx_value = df[next((c for c in df.columns if c.startswith('ADX_')), 'ADX_14')].iloc[-1]
+                        
+                        args = {'df': df.copy(), 'params': {}, 'rvol': 1.0, 'adx_value': adx_value}
+                        if scanner_name == 'support_rebound':
+                            args.update({'exchange': bot_data.exchange, 'symbol': symbol})
+                        
+                        result = await scanner_func(**args) if asyncio.iscoroutinefunction(scanner_func) else scanner_func(**{k: v for k, v in args.items() if k not in ['exchange', 'symbol']})
+
+                        if result:
+                            reason_text = result.get('reason', scanner_name)
+                            found_opportunities.append({'symbol': symbol, 'reason': reason_text})
+                            logger.info(f"✅ Opportunity found for {symbol} by {reason_text}")
+                            # Here you would typically trigger the trade opening logic
+                            # For now, we'll just report it.
+                except Exception:
+                    continue
+        
+        finally:
+            duration = time.time() - start_time
+            bot_data.last_scan_info = {'duration_seconds': f"{duration:.2f}", 'checked_symbols': scanned_symbols_count}
+            
+            if manual_run:
+                report = f"✅ **اكتمل الفحص اليدوي!**\n\n"
+                report += f"⏱️ **المدة:** {duration:.2f} ثانية\n"
+                report += f"📊 **العملات المفحوصة:** {scanned_symbols_count}\n\n"
+                
+                if found_opportunities:
+                    report += "🎯 **الفرص التي تم العثور عليها:**\n"
+                    for opp in found_opportunities[:10]: # Limit to 10 to avoid message size limit
+                        reason_ar = STRATEGY_NAMES_AR.get(opp['reason'], opp['reason'])
+                        report += f"- `{opp['symbol']}` (السبب: {reason_ar})\n"
+                else:
+                    report += "⭕ لم يتم العثور على أي فرص مطابقة للشروط الحالية."
+                await context.bot.send_message(TELEGRAM_CHAT_ID, report, parse_mode=ParseMode.MARKDOWN)
 
 async def maestro_job(context: ContextTypes.DEFAULT_TYPE):
-    # ... (This long function remains the same)
-    pass
+    logger.info("🧠 Maestro: Running market regime analysis...")
+    if not bot_data.settings.get('maestro_mode_enabled', True):
+        logger.info("Maestro mode is disabled.")
+        return
+        
+    try:
+        regime = await get_market_regime(bot_data.exchange)
+        if regime in DECISION_MATRIX:
+            adjustments = DECISION_MATRIX[regime]
+            current_settings = bot_data.settings
+            
+            # Apply adjustments
+            for key, value in adjustments.items():
+                current_settings[key] = value
+            
+            # Save the new adaptive settings
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(current_settings, f, indent=4)
+            
+            bot_data.active_preset_name = f"المايسترو ({regime})"
+            
+            active_scanners_ar = [STRATEGY_NAMES_AR.get(s, s) for s in adjustments.get('active_scanners', [])]
+            
+            message = (f"**🧠 المايسترو:** تم تكييف الإعدادات مع حالة السوق!\n"
+                       f"**الحالة الحالية:** `{regime}`\n"
+                       f"**الماسحات النشطة:** {', '.join(active_scanners_ar)}\n"
+                       f"**نسبة المخاطرة/العائد:** `{adjustments.get('risk_reward_ratio', 'N/A')}`")
+            await context.bot.send_message(TELEGRAM_CHAT_ID, message, parse_mode=ParseMode.MARKDOWN)
+        else:
+            logger.warning(f"Maestro: Unknown market regime '{regime}'. No adjustments made.")
+    except Exception as e:
+        logger.error(f"Maestro job failed: {e}", exc_info=True)
+
 
 # --- Bot Startup ---
 async def post_init(application: Application):
@@ -212,4 +342,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
