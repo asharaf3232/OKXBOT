@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 Wise Maestro Bot | v301.0 (Fixed & Fully Functional) 🚀 ---
+# --- 🚀 Wise Maestro Bot | v304.0 (Complete & Unabridged Final Version) 🚀 ---
 # =======================================================================================
 import os
 import logging
@@ -11,22 +11,33 @@ import copy
 from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 import aiosqlite
+import pandas as pd
 import ccxt.async_support as ccxt
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.constants import ParseMode
 from telegram.error import Forbidden
-from dotenv import load_dotenv
 
-# --- استيراد الوحدات المنفصلة (هيكلك الصحيح) ---
+# --- [الإصلاح النهائي لمشكلة المتغيرات] ---
+from dotenv import load_dotenv
+try:
+    dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(dotenv_path):
+        load_dotenv(dotenv_path=dotenv_path)
+    else:
+        pass 
+except Exception as e:
+    print(f"Could not load .env file: {e}")
+# --- [نهاية الإصلاح] ---
+
+
+# --- استيراد الوحدات المنفصلة ---
 from settings_config import *
-from strategy_scanners import SCANNERS, filter_whale_radar
-from ai_market_brain import get_market_regime, get_market_mood, get_okx_markets
+from strategy_scanners import SCANNERS, find_col
+from ai_market_brain import get_market_mood, get_okx_markets
 from smart_engine import EvolutionaryEngine
 import ui_handlers
 from wise_maestro_guardian import TradeGuardian, PublicWebSocketManager, PrivateWebSocketManager
-
-load_dotenv()
 
 # --- جلب المتغيرات ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -66,16 +77,22 @@ scan_lock = asyncio.Lock()
 
 # --- الدوال الرئيسية ---
 def load_settings():
+    bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, 'r') as f:
                 user_settings = json.load(f)
-                bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
-                bot_data.settings.update(user_settings)
-        else: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
-    except Exception: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
-    with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4)
-    logger.info("Settings loaded successfully.")
+                for key, value in user_settings.items():
+                    if isinstance(value, dict) and key in bot_data.settings:
+                        bot_data.settings[key].update(value)
+                    else:
+                        bot_data.settings[key] = value
+    except Exception as e:
+        logger.error(f"Could not load settings file, using defaults. Error: {e}")
+    
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(bot_data.settings, f, indent=4)
+    logger.info("Settings loaded and verified successfully.")
 
 async def init_database():
     try:
@@ -88,9 +105,6 @@ async def maestro_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🧠 Maestro: Running market regime analysis...")
     pass
 
-# =======================================================================================
-# --- [الكود المضاف] منطق الفحص والتداول الكامل ---
-# =======================================================================================
 async def worker_batch(queue, signals_list, errors_list):
     settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
@@ -100,31 +114,45 @@ async def worker_batch(queue, signals_list, errors_list):
             symbol = market['symbol']
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df = df.set_index('timestamp').sort_index()
             if len(df) < 50:
                 queue.task_done(); continue
             
             # --- سلسلة الفلاتر ---
-            # فلتر السيولة والتقلب والاتجاه
-            last_close = df['close'].iloc[-2]
-            df.ta.atr(length=14, append=True)
-            atr_col = next((col for col in df.columns if col.startswith('ATRr_')), None)
-            atr_percent = (df[atr_col].iloc[-2] / last_close) * 100 if atr_col and last_close > 0 else 0
+            last_close = df['close'].iloc[-1]
+            if last_close == 0:
+                queue.task_done(); continue
+
+            # Volatility Filter
+            df.ta.atr(length=settings['volatility_filters']['atr_period_for_filter'], append=True)
+            atr_col = find_col(df.columns, f"ATRr_{settings['volatility_filters']['atr_period_for_filter']}")
+            if not atr_col or pd.isna(df[atr_col].iloc[-1]):
+                queue.task_done(); continue
+            atr_percent = (df[atr_col].iloc[-1] / last_close) * 100
             if atr_percent < settings['volatility_filters']['min_atr_percent']:
                 queue.task_done(); continue
 
-            # ... يمكنك إضافة باقي الفلاتر هنا بنفس الطريقة (RVOL, EMA, etc) ...
+            # Liquidity Filter (RVol)
+            df['volume_sma'] = df['volume'].rolling(20).mean()
+            if pd.isna(df['volume_sma'].iloc[-1]) or df['volume_sma'].iloc[-1] == 0:
+                queue.task_done(); continue
+            rvol = df['volume'].iloc[-1] / df['volume_sma'].iloc[-1]
+            if rvol < settings['liquidity_filters']['min_rvol']:
+                queue.task_done(); continue
+
+            # ADX Filter
+            adx_value = 0
+            if settings['adx_filter_enabled']:
+                df.ta.adx(append=True)
+                adx_col_name = find_col(df.columns, "ADX_")
+                if adx_col_name and pd.notna(df[adx_col_name].iloc[-1]):
+                    adx_value = df[adx_col_name].iloc[-1]
+                if adx_value < settings['adx_filter_level']:
+                    queue.task_done(); continue
 
             # --- تشغيل الماسحات ---
             confirmed_reasons = []
             for name in settings['active_scanners']:
-                if name == 'whale_radar': continue
                 if not (strategy_func := SCANNERS.get(name)): continue
-                
-                # وسيطات فارغة مبدئياً
-                rvol = 0
-                adx_value = 0
                 
                 func_args = {'df': df.copy(), 'params': {}, 'rvol': rvol, 'adx_value': adx_value}
                 if name in ['support_rebound']:
@@ -137,19 +165,16 @@ async def worker_batch(queue, signals_list, errors_list):
             if confirmed_reasons:
                 reason_str = ' + '.join(set(confirmed_reasons))
                 entry_price = last_close
-                risk = df[atr_col].iloc[-2] * settings['atr_sl_multiplier']
+                atr_value = df[atr_col].iloc[-1]
+                risk = atr_value * settings['atr_sl_multiplier']
                 stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
                 signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
             
             queue.task_done()
         except Exception as e:
-            if 'symbol' in locals():
-                logger.error(f"Error processing symbol {symbol}: {e}")
-                errors_list.append(symbol)
-            else:
-                logger.error(f"Worker error with no symbol context: {e}")
-            if not queue.empty():
-                queue.task_done()
+            symbol_name = locals().get('symbol', 'N/A')
+            logger.error(f"Error processing symbol {symbol_name}: {e}", exc_info=True)
+            if not queue.empty(): queue.task_done()
 
 async def initiate_real_trade(signal):
     if not bot_data.trading_enabled: return False
@@ -160,7 +185,7 @@ async def initiate_real_trade(signal):
         balance = await exchange.fetch_balance()
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
         if usdt_balance < trade_size:
-            logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
+            logger.warning(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
             return False
 
         base_amount = trade_size / signal['entry_price']
@@ -191,47 +216,50 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE, manual_run=False):
         market_mood = await get_market_mood(bot_data)
         if market_mood["mood"] != "POSITIVE":
             logger.warning(f"Scan skipped: Market mood is {market_mood['mood']}. Reason: {market_mood['reason']}")
+            if manual_run: await context.bot.send_message(TELEGRAM_CHAT_ID, f"⏸️ **إيقاف البحث:** {market_mood['reason']}")
             return
 
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
         
-        if active_trades_count >= bot_data.settings['max_concurrent_trades']:
-            logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached.")
-            return
+        if active_trades_count >= bot_data.settings['max_concurrent_trades']: return
 
         top_markets = await get_okx_markets(bot_data)
         if not top_markets: return
 
         symbols_to_scan = [m['symbol'] for m in top_markets]
-        ohlcv_data = await asyncio.gather(*[bot_data.exchange.fetch_ohlcv(s, TIMEFRAME, limit=100) for s in symbols_to_scan], return_exceptions=True)
+        ohlcv_results = await asyncio.gather(*[bot_data.exchange.fetch_ohlcv(s, TIMEFRAME, limit=100) for s in symbols_to_scan], return_exceptions=True)
         
         queue, signals_found, analysis_errors = asyncio.Queue(), [], []
         for i, market in enumerate(top_markets):
-            if isinstance(ohlcv_data[i], list) and ohlcv_data[i]:
-                await queue.put({'market': market, 'ohlcv': ohlcv_data[i]})
+            if isinstance(ohlcv_results[i], list) and ohlcv_results[i]:
+                await queue.put({'market': market, 'ohlcv': ohlcv_results[i]})
 
         worker_tasks = [asyncio.create_task(worker_batch(queue, signals_found, analysis_errors)) for _ in range(bot_data.settings.get("worker_threads", 10))]
-        await queue.join()
-        for task in worker_tasks: task.cancel()
+        await queue.join(); [task.cancel() for task in worker_tasks]
 
         trades_opened_count = 0
         for signal in signals_found:
             if active_trades_count >= bot_data.settings['max_concurrent_trades']: break
             if await initiate_real_trade(signal):
-                active_trades_count += 1
-                trades_opened_count += 1
+                active_trades_count += 1; trades_opened_count += 1
                 await asyncio.sleep(2)
 
         duration = time.time() - start_time
         bot_data.last_scan_info = {'duration_seconds': f"{duration:.2f}", 'checked_symbols': len(top_markets), 'found_signals': len(signals_found), 'opened_trades': trades_opened_count}
         logger.info(f"Scan finished in {duration:.2f}s. Found {len(signals_found)} signals, opened {trades_opened_count} trades.")
-# =======================================================================================
+
+        if manual_run:
+            report = (f"✅ **اكتمل الفحص!**\n\n"
+                      f"⏱️ **المدة:** {duration:.2f} ثانية\n📊 **العملات المفحوصة:** {len(top_markets)}\n"
+                      f"💡 **الفرص المكتشفة:** {len(signals_found)}\n"
+                      f"🚀 **صفقات تم فتحها:** {trades_opened_count}")
+            await context.bot.send_message(TELEGRAM_CHAT_ID, report, parse_mode=ParseMode.MARKDOWN)
 
 async def post_init(application: Application):
     logger.info("--- Bot post-initialization started ---")
     if not all([TELEGRAM_BOT_TOKEN, OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRSE, TELEGRAM_CHAT_ID]):
-        logger.critical("FATAL: Missing critical environment variables."); return
+        logger.critical("FATAL: Missing critical environment variables. Please check your .env file or server configuration."); return
 
     bot_data.application = application
     
@@ -239,7 +267,7 @@ async def post_init(application: Application):
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRSE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
-        logger.info("✅ Step 1/5: Successfully connected to OKX and loaded markets.")
+        logger.info("✅ Step 1/5: Successfully connected to OKX.")
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}", exc_info=True); return
 
@@ -257,11 +285,9 @@ async def post_init(application: Application):
     asyncio.create_task(bot_data.private_ws.run())
     logger.info("✅ Step 4/5: WebSockets initiated.")
 
-    # --- [الكود المُعدّل] ---
     logger.info("Waiting 5s for WebSocket connections to establish before syncing...")
     await asyncio.sleep(5)
     await bot_data.guardian.sync_subscriptions()
-    # --- [نهاية التعديل] ---
     
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
@@ -270,15 +296,14 @@ async def post_init(application: Application):
     logger.info("✅ Step 5/5: All periodic jobs have been scheduled.")
 
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 Wise Maestro Bot (Final Stable Version) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 Wise Maestro Bot (v304 - Final) is online.*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     
     logger.info("--- Bot is now fully operational ---")
 
 async def post_shutdown(application: Application):
-    if bot_data.exchange:
-        await bot_data.exchange.close()
+    if bot_data.exchange: await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
 def main():
