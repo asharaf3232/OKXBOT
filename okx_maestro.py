@@ -1379,11 +1379,26 @@ class OKXWebSocketManager:
                 except Exception: pass
 
     async def stop(self):
-        self.is_running = False
-        if self.public_ws and not self.public_ws.closed:
-            await self.public_ws.close()
-        if self.private_ws and not self.private_ws.closed:
-            await self.private_ws.close()
+    """
+    [تم التعديل] يوقف جميع اتصالات ومهام WebSocket بأمان.
+    """
+    self.is_running = False
+    
+    # قائمة بالمهام التي تحتاج إلى إلغاء
+    tasks_to_cancel = []
+    if self.public_task:
+        tasks_to_cancel.append(self.public_task)
+    if self.private_task:
+        tasks_to_cancel.append(self.private_task)
+
+    # إلغاء المهام
+    for task in tasks_to_cancel:
+        task.cancel()
+    
+    # الانتظار حتى يتم تأكيد إلغاء جميع المهام
+    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+    logger.info("WebSocket Manager stopped gracefully.")
 # =======================================================================================
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
@@ -2213,8 +2228,16 @@ async def post_init(application: Application):
     await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX V8.0 (مستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
-    if bot_data.exchange: await bot_data.exchange.close()
-    if bot_data.websocket_manager: await bot_data.websocket_manager.stop()
+    """
+    [تم التعديل] دالة إيقاف التشغيل الرئيسية التي تضمن إغلاق كل شيء بالترتيب الصحيح.
+    """
+    logger.info("Bot shutdown initiated...")
+    if bot_data.websocket_manager:
+        # ننتظر مدير الـ WebSocket حتى ينهي مهامه بالكامل
+        await bot_data.websocket_manager.stop()
+    if bot_data.exchange:
+        # ننتظر اتصال المنصة حتى يغلق
+        await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
 def main():
