@@ -1126,7 +1126,7 @@ class OKXWebSocketManager:
         except Exception as e:
             logger.error(f"Error handling public message: {e}")
 
-    async def _handle_private_message(self, message):
+   async def _handle_private_message(self, message):
     try:
         data = json.loads(message)
         # ✅ الحل: التحقق أولاً من وجود مفتاح 'data' وأن له قيمة
