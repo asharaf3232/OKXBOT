@@ -1390,7 +1390,7 @@ class OKXWebSocketManager:
         logger.info("WebSocket Manager stopped gracefully.")
 # =======================================================================================
 
- async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
+async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
    
    # المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
     
