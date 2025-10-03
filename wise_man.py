@@ -71,7 +71,7 @@ class WiseMan:
                         logger.info(f"Wise Man confirms entry for {symbol}. Price is optimal. Initiating trade.")
                         # استدعاء دالة فتح الصفقة من الملف الرئيسي
                         from okx_maestro import initiate_real_trade 
-                        if await initiate_real_trade(candidate, self.bot_data.settings, self.exchange):
+                        if await initiate_real_trade(candidate, self.bot_data.settings, self.exchange, self.application.bot):
                              await conn.execute("UPDATE trade_candidates SET status = 'executed' WHERE id = ?", (candidate['id'],))
                         else:
                              await conn.execute("UPDATE trade_candidates SET status = 'failed_execution' WHERE id = ?", (candidate['id'],))
