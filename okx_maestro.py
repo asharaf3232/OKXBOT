@@ -1379,22 +1379,26 @@ class OKXWebSocketManager:
                 except Exception: pass
 
     async def stop(self):
-   
-    self.is_running = False
-    
-    # قائمة بالمهام التي تحتاج إلى إلغاء
-    tasks_to_cancel = []
-    if self.public_task:
-        tasks_to_cancel.append(self.public_task)
-    if self.private_task:
-        tasks_to_cancel.append(self.private_task)
+        """
+        [تم التعديل] يوقف جميع اتصالات ومهام WebSocket بأمان.
+        """
+        self.is_running = False
+        
+        # قائمة بالمهام التي تحتاج إلى إلغاء
+        tasks_to_cancel = []
+        if self.public_task:
+            tasks_to_cancel.append(self.public_task)
+        if self.private_task:
+            tasks_to_cancel.append(self.private_task)
 
-    # إلغاء المهام
-    for task in tasks_to_cancel:
-        task.cancel()
-    
-    # الانتظار حتى يتم تأكيد إلغاء جميع المهام
-    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        # إلغاء المهام
+        for task in tasks_to_cancel:
+            task.cancel()
+        
+        # الانتظار حتى يتم تأكيد إلغاء جميع المهام
+        await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+        logger.info("WebSocket Manager stopped gracefully.")
 
     logger.info("WebSocket Manager stopped gracefully.")
 # =======================================================================================
