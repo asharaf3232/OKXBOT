@@ -836,41 +836,43 @@ async def has_active_trade_for_symbol(symbol: str) -> bool:
         return True
 
 # التعديل الأول: الدالة الآن تستقبل 'settings' و 'exchange' بشكل صريح
-async def initiate_real_trade(signal, settings, exchange):
+async def initiate_real_trade(signal, settings, exchange, bot):
+    """
+    [النسخة المعدلة] تفتح صفقة حقيقية وتستقبل كل الاعتماديات بشكل مباشر.
+    """
     if not bot_data.trading_enabled:
-        logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
+        logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active.")
+        return False
 
     try:
-        # التعديل الثاني: نحذف هذا السطر لأنه لم يعد ضروريًا
-        # settings, exchange = bot_data.settings, bot_data.exchange
-        
-        # التعديل الثالث: نستخدم 'settings' التي تم تمريرها للدالة مباشرة
+        # تم حذف السطر الذي كان يجلب الإعدادات والمنصة من 'bot_data'
+        # الآن نستخدم 'settings' و 'exchange' التي تم تمريرها للدالة مباشرة
+
         base_trade_size = settings['real_trade_size_usdt']
         trade_weight = signal.get('weight', 1.0)
         trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
-        # --- [الإصلاح الحاسم] التحقق من الحد الأدنى لقيمة الصفقة (تكييف مع OKX: استخدام 'cost' limits) ---
+
+        # --- التحقق من الحد الأدنى لقيمة الصفقة ---
         try:
             market = exchange.market(signal['symbol'])
-            # في OKX عبر CCXT، 'notional' قد يكون تحت 'cost'
             min_notional_str = market.get('limits', {}).get('notional', {}).get('min') or market.get('limits', {}).get('cost', {}).get('min')
-
             if min_notional_str is not None:
                 min_notional_value = float(min_notional_str)
-                required_size = min_notional_value * 1.05 
-
+                required_size = min_notional_value * 1.05
                 if trade_size < required_size:
-                    logger.warning(f"Trade for {signal['symbol']} aborted. Trade size ({trade_size:.2f} USDT) is below the required minimum notional value with safety margin ({required_size:.2f} USDT).")
+                    logger.warning(f"Trade for {signal['symbol']} aborted. Trade size ({trade_size:.2f} USDT) is below the required minimum ({required_size:.2f} USDT).")
                     return False
         except Exception as e:
             logger.error(f"Could not fetch market rules for {signal['symbol']}: {e}. Skipping trade to be safe.")
             return False
-        # --- [نهاية الإصلاح] ---
+        # --- نهاية التحقق ---
 
         balance = await exchange.fetch_balance()
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
 
         if usdt_balance < trade_size:
-            logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance:,.2f}, Need: {trade_size:,.2f}"); return False
+            logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance:,.2f}, Need: {trade_size:,.2f}")
+            return False
 
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
@@ -878,7 +880,8 @@ async def initiate_real_trade(signal, settings, exchange):
         buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
 
         if await log_pending_trade_to_db(signal, buy_order):
-            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`. في انتظار تأكيد التنفيذ...")
+            # استخدم 'bot' الذي تم تمريره مباشرة لإرسال الرسالة
+            await safe_send_message(bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`. في انتظار تأكيد التنفيذ...")
             return True
         else:
             logger.critical(f"CRITICAL: Failed to log pending trade for {signal['symbol']}. Cancelling order {buy_order['id']}.")
@@ -891,7 +894,6 @@ async def initiate_real_trade(signal, settings, exchange):
     except Exception as e:
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
-
 async def log_candidate_to_db(signal):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
