@@ -1410,7 +1410,7 @@ class OKXWebSocketManager:
 
  async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
    
-    #المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
+   # المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
     
     logger.info("🕵️ Supervisor: Running audit and recovery checks...")
 
@@ -1442,6 +1442,20 @@ class OKXWebSocketManager:
                 except Exception as e:
                     logger.error(f"🕵️ Supervisor: Error processing stuck pending trade #{trade['id']}: {e}")
 
+        # --- إدارة الصفقات في الحضانة ---
+        incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
+        if incubated_trades:
+            logger.warning(f"🕵️ Supervisor: Found {len(incubated_trades)} trades in incubator...")
+            for trade_data in incubated_trades:
+                trade = dict(trade_data)
+                try:
+                    await conn.execute("UPDATE trades SET status = 'retry_exit' WHERE id = ?", (trade['id'],))
+                except Exception as e:
+                    logger.error(f"🕵️ Supervisor: Error processing incubated trade #{trade['id']}: {e}")
+
+        await conn.commit()
+
+    logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
         # --- إدارة الصفقات في الحضانة ---
         incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
         if incubated_trades:
