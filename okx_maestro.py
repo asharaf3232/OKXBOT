@@ -2048,29 +2048,30 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
     await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
 
     try:
-        # **[الإصلاح]** يجب فتح اتصال بقاعدة البيانات هنا
+        # لا نحتاج لفتح اتصال DB هنا لأن _close_trade ستقوم بذلك
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             trade = await (await conn.execute("SELECT * FROM trades WHERE id = ? AND status = 'active'", (trade_id,))).fetchone()
 
-            if not trade:
-                await query.answer("لم يتم العثور على الصفقة أو أنها ليست نشطة.", show_alert=True)
-                # ... (منطق العودة يبقى كما هو) ...
-                return
+        if not trade:
+            await query.answer("لم يتم العثور على الصفقة أو أنها ليست نشطة.", show_alert=True)
+            await show_trades_command(update, context) # العودة لقائمة الصفقات
+            return
 
-            trade = dict(trade)
-            ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
-            current_price = ticker['last']
+        trade = dict(trade)
+        ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
+        current_price = ticker['last']
 
-            # **[الإصلاح]** تمرير اتصال قاعدة البيانات 'conn' إلى دالة الإغلاق
-            await bot_data.websocket_manager._close_trade(conn, trade, "إغلاق يدوي", current_price)
-            await query.answer("✅ تم إرسال أمر البيع بنجاح!")
+        # --- [✅ هذا هو الإصلاح الجوهري] ---
+        # استدعاء دالة الإغلاق من المدير الصحيح trade_guardian
+        await bot_data.trade_guardian._close_trade(trade, "إغلاق يدوي", current_price)
+        
+        await query.answer("✅ تم إرسال أمر البيع بنجاح!")
 
     except Exception as e:
         logger.error(f"Manual sell execution failed for trade #{trade_id}: {e}", exc_info=True)
         await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: {e}")
         await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
-
 # ==============================================================================
 # --- دالة موجه الأزرار الرئيسية ---
 # ==============================================================================
