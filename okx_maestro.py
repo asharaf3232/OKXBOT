@@ -1453,32 +1453,25 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         async with aiosqlite.connect(DB_FILE) as conn:
             total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
             active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
-    except sqlite3.OperationalError as e:
-        if "no such table: trades" in str(e):
-            logger.warning("DB table 'trades' missing in diagnostics. Re-initializing...")
-            await init_database()
-        else:
-            logger.error(f"Diagnostics DB Error: {e}")
     except Exception as e:
         logger.error(f"Diagnostics DB Error: {e}")
 
-    # --- [✅ الكود المحدث والكامل لفحص حالة الاتصال الصحيحة] ---
-    ws_status = "غير مهيأ ⚠️"
+    # --- [✅ الطريقة النهائية لفحص حالة الاتصال عبر المهام] ---
+    ws_status = "غير متصل ❌"
     try:
-        public_ws_manager = getattr(bot_data, 'public_ws', None)
-        private_ws_manager = getattr(bot_data, 'private_ws', None)
-        
-        public_ws_connected = public_ws_manager and getattr(public_ws_manager, 'websocket', None) and public_ws_manager.websocket.open
-        private_ws_connected = private_ws_manager and getattr(private_ws_manager, 'websocket', None) and private_ws_manager.websocket.open
+        public_task = getattr(bot_data, 'public_ws_task', None)
+        private_task = getattr(bot_data, 'private_ws_task', None)
 
-        if public_ws_connected and private_ws_connected:
+        # المهمة التي لم تنتهِ (.done() is False) تعتبر "عاملة"
+        public_running = public_task and not public_task.done()
+        private_running = private_task and not private_task.done()
+
+        if public_running and private_running:
             ws_status = "متصل ✅ (عام وخاص)"
-        elif public_ws_connected:
+        elif public_running:
             ws_status = "متصل جزئيًا (عام فقط) ⚠️"
-        elif private_ws_connected:
+        elif private_running:
             ws_status = "متصل جزئيًا (خاص فقط) ⚠️"
-        else:
-            ws_status = "غير متصل ❌"
     except Exception:
         ws_status = "خطأ في الفحص ❌"
     
@@ -2159,8 +2152,9 @@ async def post_init(application: Application):
     bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
     bot_data.private_ws = PrivateWebSocketManager()
     
-    asyncio.create_task(bot_data.public_ws.run())
-    asyncio.create_task(bot_data.private_ws.run())
+    # ✅ التعديل: نقوم بتخزين المهام للتحقق من حالتها لاحقًا
+    bot_data.public_ws_task = asyncio.create_task(bot_data.public_ws.run())
+    bot_data.private_ws_task = asyncio.create_task(bot_data.private_ws.run())
     
     logger.info("WebSocket engines started. Waiting 5s for connections to establish...")
     await asyncio.sleep(5)
