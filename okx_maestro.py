@@ -1380,8 +1380,6 @@ class OKXWebSocketManager:
 
     async def stop(self):
    
-    [تم التعديل] يوقف جميع اتصالات ومهام WebSocket بأمان.
-   
     self.is_running = False
     
     # قائمة بالمهام التي تحتاج إلى إلغاء
