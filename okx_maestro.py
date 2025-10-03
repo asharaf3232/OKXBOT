@@ -835,16 +835,19 @@ async def has_active_trade_for_symbol(symbol: str) -> bool:
         logger.error(f"Database check for active trade failed for {symbol}: {e}")
         return True
 
-async def initiate_real_trade(signal):
+# التعديل الأول: الدالة الآن تستقبل 'settings' و 'exchange' بشكل صريح
+async def initiate_real_trade(signal, settings, exchange):
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
 
     try:
-        settings, exchange = bot_data.settings, bot_data.exchange
+        # التعديل الثاني: نحذف هذا السطر لأنه لم يعد ضروريًا
+        # settings, exchange = bot_data.settings, bot_data.exchange
+        
+        # التعديل الثالث: نستخدم 'settings' التي تم تمريرها للدالة مباشرة
         base_trade_size = settings['real_trade_size_usdt']
         trade_weight = signal.get('weight', 1.0)
         trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
-
         # --- [الإصلاح الحاسم] التحقق من الحد الأدنى لقيمة الصفقة (تكييف مع OKX: استخدام 'cost' limits) ---
         try:
             market = exchange.market(signal['symbol'])
