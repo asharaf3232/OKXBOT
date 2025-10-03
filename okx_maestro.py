@@ -802,7 +802,7 @@ async def activate_trade(order_id, symbol):
     sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
     reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
     strength_stars = '⭐' * trade.get('signal_strength', 1)
-
+    sl_percent_abs = abs(sl_percent)
     success_msg = (
         f"✅ **تم تأكيد الشراء | {symbol}**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -814,7 +814,7 @@ async def activate_trade(order_id, symbol):
         f"  - **التكلفة الإجمالية:** `${trade_cost:,.2f}`\n"
         f"**الأهداف:**\n"
         f"  - **الهدف (TP):** `${new_take_profit:,.4f}` `({tp_percent:+.2f}%)`\n"
-        f"  - **الوقف (SL):** `${trade['stop_loss']:,.4f}` `({sl_percent:.2f}%)`\n"
+        f"  - **الوقف (SL):** `${trade['stop_loss']:,.4f}` `({sl_percent_abs:.2f}%)`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"💰 **السيولة المتبقية:** `${usdt_remaining:,.2f}`\n"
         f"🔄 **الصفقات النشطة:** `{active_trades_count}`"
@@ -1063,16 +1063,22 @@ async def activate_trade(order_id, symbol):
     sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
     reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
     strength_stars = '⭐' * trade.get('signal_strength', 1)
-
+    sl_percent_abs = abs(sl_percent)
     success_msg = (
         f"✅ **تم تأكيد الشراء | {symbol}**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"**الاستراتيجية:** {reasons_ar} {strength_stars}\n"
-        f"**رقم:** `#{trade['id']}` | **سعر التنفيذ:** `${filled_price:,.4f}`\n"
-        f"**الهدف (TP):** `${new_take_profit:,.4f}` `({tp_percent:+.2f}%)`\n"
-        f"**الوقف (SL):** `${trade['stop_loss']:,.4f}` `({sl_percent:.2f}%)`\n"
+        f"**تفاصيل الصفقة:**\n"
+        f"  - **رقم:** `#{trade['id']}`\n"
+        f"  - **سعر التنفيذ:** `${filled_price:,.4f}`\n"
+        f"  - **الكمية:** `{net_filled_quantity:,.4f}`\n"
+        f"  - **التكلفة الإجمالية:** `${trade_cost:,.2f}`\n"
+        f"**الأهداف:**\n"
+        f"  - **الهدف (TP):** `${new_take_profit:,.4f}` `({tp_percent:+.2f}%)`\n"
+        f"  - **الوقف (SL):** `${trade['stop_loss']:,.4f}` `({sl_percent_abs:.2f}%)`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💰 **السيولة المتبقية:** `${usdt_remaining:,.2f}` | **الصفقات النشطة:** `{active_trades_count}`"
+        f"💰 **السيولة المتبقية:** `${usdt_remaining:,.2f}`\n"
+        f"🔄 **الصفقات النشطة:** `{active_trades_count}`"
     )
     await safe_send_message(bot, success_msg)
 
@@ -1313,11 +1319,42 @@ class TradeGuardian:
                 await conn.commit()
 
             await bot_data.public_ws.unsubscribe([symbol])
-
+            try:
+                start_dt = datetime.fromisoformat(trade['timestamp'])
+                end_dt = datetime.now(EGYPT_TZ)
+                duration = end_dt - start_dt
+                days, rem = divmod(duration.total_seconds(), 86400)
+                hours, rem = divmod(rem, 3600)
+                minutes, _ = divmod(rem, 60)
+                if days > 0: duration_str = f"{int(days)} يوم و {int(hours)} ساعة"
+                elif hours > 0: duration_str = f"{int(hours)} ساعة و {int(minutes)} دقيقة"
+                else: duration_str = f"{int(minutes)} دقيقة"
+            except: duration_str = "N/A"
+            highest_price_reached = max(trade.get('highest_price', 0), close_price)
+            exit_efficiency = 0
+            if highest_price_reached > trade['entry_price']:
+                potential_pnl = (highest_price_reached - trade['entry_price']) * trade['quantity']
+                if potential_pnl > 0:
+                    exit_efficiency = (pnl / potential_pnl) * 100
+                    exit_efficiency = max(0, min(exit_efficiency, 100))
             emoji = "✅" if pnl >= 0 else "🛑"
-            msg = (f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n"
-                   f"**السبب:** {reason}\n"
-                   f"**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+            reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
+            msg = (
+                f"{emoji} **ملف المهمة المكتملة**\n\n"
+                f"▫️ **العملة:** `{symbol}`\n"
+                f"▫️ **رقم الصفقة:** `{trade_id}`\n"
+                f"▫️ **الاستراتيجية:** `{reasons_ar}`\n"
+                f"▫️ **سبب الإغلاق:** `{reason}`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"💰 **صافي الربح/الخسارة:** `${pnl:,.2f}` `({pnl_percent:+.2f}%)`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"⏳ **مدة الصفقة:** `{duration_str}`\n"
+                f"📉 **متوسط سعر الدخول:** `${trade['entry_price']:,.4f}`\n"
+                f"📈 **متوسط سعر الخروج:** `${close_price:,.4f}`\n"
+                f"🔝 **أعلى سعر وصلت إليه:** `${highest_price_reached:,.4f}`\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🧠 **كفاءة الخروج:** `{exit_efficiency:.2f}%`"
+            )
             await safe_send_message(bot, msg)
 
         except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as e:
@@ -2165,13 +2202,13 @@ async def post_init(application: Application):
     # Schedule the Wise Man's new real-time decision engine to run every 10 seconds
     jq.run_repeating(wise_man.run_realtime_review, interval=10, first=5, name="wise_man_realtime_engine")
     # --------------------------
-
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
     jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
+    jq.run_repeating(wise_man.review_active_trades_with_tactics, interval=900, first=120, name="wise_man_tactical_review")
 
     logger.info(f"All jobs scheduled. OKX Bot is fully operational.")
     await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX V8.0 (مستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
