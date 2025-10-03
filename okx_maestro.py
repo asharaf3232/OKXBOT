@@ -1127,13 +1127,18 @@ class OKXWebSocketManager:
             logger.error(f"Error handling public message: {e}")
 
     async def _handle_private_message(self, message):
-        try:
-            data = json.loads(message)
+    try:
+        data = json.loads(message)
+        # ✅ الحل: التحقق أولاً من وجود مفتاح 'data' وأن له قيمة
+        if 'data' in data and data['data']:
             if data.get('arg', {}).get('channel') == 'orders':
-                order_data = data['data'][0] if data['data'] else {}
+                order_data = data['data'][0]
                 await handle_order_update(order_data)
-        except Exception as e:
-            logger.error(f"Error handling private message: {e}")
+        # يمكنك إضافة طباعة للرسائل الأخرى للمساعدة في التشخيص مستقبلاً
+        # else:
+        #     logger.info(f"OKX Private WS: Received a non-data message: {message}")
+    except Exception as e:
+        logger.error(f"Error handling private message: {e} | Raw message: {message}")
 
     async def _handle_ticker_update(self, ticker_data):
         symbol = ticker_data.get('instId', '').replace('-', '/')
@@ -1405,7 +1410,7 @@ class OKXWebSocketManager:
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
    
-   # المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
+    #المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
     
     logger.info("🕵️ Supervisor: Running audit and recovery checks...")
 
@@ -2235,23 +2240,25 @@ async def post_shutdown(application: Application):
     """
     logger.info("Bot shutdown initiated...")
     if bot_data.websocket_manager:
+        # ننتظر مدير الـ WebSocket حتى ينهي مهامه بالكامل
         await bot_data.websocket_manager.stop()
     if bot_data.exchange:
+        # ننتظر اتصال المنصة حتى يغلق
         await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
 def main():
-    logger.info(f"Starting OKX Maestro Bot V9.0...")
+    logger.info("Starting OKX Maestro Bot V8.0...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
-    # ... (all handlers)
+
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("scan", manual_scan_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
+
     application.run_polling()
-
+    
 if __name__ == '__main__':
-    if not all([WiseMan, EvolutionaryEngine]):
-        logger.critical("Missing core modules (WiseMan or EvolutionaryEngine). Please ensure the files are present.")
-    else:
-        main()
-
-
+    main()
