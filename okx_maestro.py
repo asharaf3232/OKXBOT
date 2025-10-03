@@ -1004,6 +1004,9 @@ class OKXWebSocketManager:
         self.private_ws = None
         self.is_running = False
         self.conn_id = None
+        # [إضافة] لتعقب المهام لإغلاقها بأمان
+        self.public_task = None
+        self.private_task = None
 
     def _generate_signature(self, timestamp, method, request_path, secret):
         message = timestamp + method + request_path
@@ -1064,12 +1067,10 @@ class OKXWebSocketManager:
 
     async def run(self):
         self.is_running = True
-
         # تشغيل اتصال public و private بشكل متوازي
-        public_task = asyncio.create_task(self._run_public_ws())
-        private_task = asyncio.create_task(self._run_private_ws())
-
-        await asyncio.gather(public_task, private_task, return_exceptions=True)
+        self.public_task = asyncio.create_task(self._run_public_ws())
+        self.private_task = asyncio.create_task(self._run_private_ws())
+        await asyncio.gather(self.public_task, self.private_task, return_exceptions=True)
 
     async def _run_public_ws(self):
         while self.is_running:
@@ -1121,28 +1122,32 @@ class OKXWebSocketManager:
         try:
             data = json.loads(message)
             if data.get('arg', {}).get('channel') == 'tickers':
-                ticker_data = data['data'][0] if data['data'] else {}
-                await self._handle_ticker_update(ticker_data)
+                ticker_data = data['data'][0] if data.get('data') else {}
+                if ticker_data:
+                    await self._handle_ticker_update(ticker_data)
         except Exception as e:
             logger.error(f"Error handling public message: {e}")
 
-   async def _handle_private_message(self, message):
-    try:
-        data = json.loads(message)
-        # ✅ الحل: التحقق أولاً من وجود مفتاح 'data' وأن له قيمة
-        if 'data' in data and data['data']:
-            if data.get('arg', {}).get('channel') == 'orders':
-                order_data = data['data'][0]
-                await handle_order_update(order_data)
-        # يمكنك إضافة طباعة للرسائل الأخرى للمساعدة في التشخيص مستقبلاً
-        # else:
-        #     logger.info(f"OKX Private WS: Received a non-data message: {message}")
-    except Exception as e:
-        logger.error(f"Error handling private message: {e} | Raw message: {message}")
+    async def _handle_private_message(self, message):
+        try:
+            data = json.loads(message)
+            # ✅ الحل: التحقق أولاً من وجود مفتاح 'data' وأن له قيمة
+            if 'data' in data and data['data']:
+                if data.get('arg', {}).get('channel') == 'orders':
+                    order_data = data['data'][0]
+                    await handle_order_update(order_data)
+            # يمكنك إضافة طباعة للرسائل الأخرى للمساعدة في التشخيص مستقبلاً
+            # else:
+            #     logger.info(f"OKX Private WS: Received a non-data message: {message}")
+        except Exception as e:
+            logger.error(f"Error handling private message: {e} | Raw message: {message}")
 
     async def _handle_ticker_update(self, ticker_data):
         symbol = ticker_data.get('instId', '').replace('-', '/')
         current_price = float(ticker_data.get('last', 0))
+        
+        if current_price <= 0:
+            return
 
         async with trade_management_lock:
             try:
@@ -1170,7 +1175,7 @@ class OKXWebSocketManager:
 
                     # 2. التحقق من الأهداف السعرية (فقط إذا كانت الصفقة نشطة)
                     if not should_close and trade['status'] == 'active':
-                        if current_price >= trade['take_profit']: 
+                        if current_price >= trade['take_profit']:
                             should_close = True
                             close_reason = "ناجحة (TP)"
                         elif current_price <= trade['stop_loss']:
@@ -1191,7 +1196,7 @@ class OKXWebSocketManager:
                         if highest_price > trade.get('highest_price', 0):
                             await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
 
-                        # منطق الوقف المتحرك (كامل كما هو في ملفك)
+                        # منطق الوقف المتحرك
                         if settings['trailing_sl_enabled']:
                             if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
                                 new_sl = trade['entry_price'] * 1.001
@@ -1206,8 +1211,8 @@ class OKXWebSocketManager:
                                     new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                                     if new_sl_candidate > current_sl:
                                         await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
-
-                        # منطق إشعارات الربح (مع إضافة منطق "حلب العملة")
+                        
+                        # منطق إشعارات الربح
                         if settings.get('incremental_notifications_enabled', True):
                             last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
                             increment = settings.get('incremental_notification_percent', 2.0) / 100
@@ -1216,7 +1221,6 @@ class OKXWebSocketManager:
                                 await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {trade['symbol']}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
                                 await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
 
-                                # --- [إضافة منطق حلب العملة هنا] ---
                                 cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
                                 last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
                                 if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
@@ -1224,17 +1228,14 @@ class OKXWebSocketManager:
                                     updated_trade = dict(trade)
                                     updated_trade['last_profit_notification_price'] = current_price
                                     asyncio.create_task(wise_man.check_for_strong_momentum(updated_trade))
-                                # --- [نهاية الإضافة] ---
 
-                        # منطق الحارس الحكيم (قطع الخسائر)
+                        # منطق الحارس الحكيم
                         if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
                             drawdown_pct = ((current_price / trade['highest_price']) - 1) * 100
                             trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
-
                             if drawdown_pct < trigger_pct:
                                 cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
                                 last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
-
                                 if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
                                     bot_data.last_deep_analysis_time[trade['id']] = time.time()
                                     asyncio.create_task(wise_man.perform_deep_analysis(trade))
@@ -1250,7 +1251,6 @@ class OKXWebSocketManager:
         bot = self.application.bot
 
         try:
-            # نستخدم IN ('active', ...) لضمان أننا نلتقط الصفقات التي أمر الرجل الحكيم أو المشرف بإغلاقها
             cursor = await conn.execute("UPDATE trades SET status = 'closing' WHERE id = ? AND status IN ('active', 'retry_exit', 'force_exit')", (trade_id,))
             await conn.commit()
             if cursor.rowcount == 0:
@@ -1277,7 +1277,8 @@ class OKXWebSocketManager:
 
             import math
             market = bot_data.exchange.market(symbol)
-
+            
+            # تنسيق الكمية حسب قواعد المنصة
             step_size_str = market.get('limits', {}).get('amount', {}).get('step')
             if step_size_str and float(step_size_str) > 0:
                 step_size_float = float(step_size_str)
@@ -1286,41 +1287,30 @@ class OKXWebSocketManager:
                 quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, available_quantity))
 
             logger.info(f"[{symbol}] Final formatted quantity to sell: {quantity_to_sell}")
-
-            # فحص الحد الأدنى للكمية
+            
+            # فحص الحد الأدنى للكمية والقيمة
             min_qty_str = market.get('limits', {}).get('amount', {}).get('min')
             if min_qty_str and quantity_to_sell < float(min_qty_str):
                  raise ccxt.InvalidOrder(f"Final quantity {quantity_to_sell} is below the exchange's minimum amount of {min_qty_str}.")
 
-            # --- [الإضافة الحاسمة هنا] ---
-            # فحص الحد الأدنى لقيمة الصفقة (تكييف مع OKX)
             min_notional_str = market.get('limits', {}).get('notional', {}).get('min') or market.get('limits', {}).get('cost', {}).get('min')
             if min_notional_str and (quantity_to_sell * close_price) < float(min_notional_str):
                 raise ccxt.InvalidOrder(f"Total trade value is below minimum notional. Value: {quantity_to_sell * close_price}, Min Required: {min_notional_str}")
-            # --- [نهاية الإضافة] ---
 
             await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
 
-            # --- 1. حساب النتائج المالية النهائية ---
             pnl = (close_price - trade['entry_price']) * quantity_to_sell
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             is_profit = pnl >= 0
 
-            # --- 2. تحديث قاعدة البيانات ---
             await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
             await conn.commit()
-
-            # --- 3. مزامنة الاشتراكات ---
             await self.sync_subscriptions()
 
-            # --- 4. حساب المقاييس الجديدة للرسالة التحليلية ---
             try:
-                # حساب مدة الصفقة
                 trade_entry_time = datetime.fromisoformat(trade['timestamp'])
                 duration_delta = datetime.now(EGYPT_TZ) - trade_entry_time
                 trade_duration = self._format_duration(duration_delta)
-
-                # حساب كفاءة الخروج (فقط للصفقات الرابحة)
                 exit_efficiency_str = ""
                 if is_profit and trade.get('highest_price', 0) > trade['entry_price']:
                     peak_gain = trade['highest_price'] - trade['entry_price']
@@ -1333,11 +1323,9 @@ class OKXWebSocketManager:
                 trade_duration = "غير معروف"
                 exit_efficiency_str = ""
 
-            # --- 5. صياغة وإرسال الرسالة الجديدة المفصلة ---
             title = "✅ ملف المهمة المكتملة" if is_profit else "🛑 ملف المهمة المغلقة"
             profit_emoji = "💰" if is_profit else "💸"
             reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
-
             message_body = (
                 f"▫️ *العملة:* `{trade['symbol']}`\n"
                 f"▫️ *رقم الصفقة:* `{trade['id']}`\n"
@@ -1375,37 +1363,31 @@ class OKXWebSocketManager:
         if active_symbols != self.public_subscriptions:
             logger.info(f"OKX WebSocket Manager: Syncing subscriptions. Old: {len(self.public_subscriptions)}, New: {len(active_symbols)}")
             self.public_subscriptions = active_symbols
-            # إعادة الاشتراك عبر إغلاق وإعادة فتح الاتصال
             if self.public_ws and not self.public_ws.closed:
                 try: await self.public_ws.close(code=1000, reason='Subscription change')
                 except Exception: pass
-            if self.private_ws and not self.private_ws.closed:
-                try: await self.private_ws.close(code=1000, reason='Subscription change')
-                except Exception: pass
-
+            # لا داعي لإعادة تشغيل الاتصال الخاص لأنه لا يعتمد على الرموز النشطة
+            
     async def stop(self):
         """
         [تم التعديل] يوقف جميع اتصالات ومهام WebSocket بأمان.
         """
         self.is_running = False
         
-        # قائمة بالمهام التي تحتاج إلى إلغاء
         tasks_to_cancel = []
         if self.public_task:
             tasks_to_cancel.append(self.public_task)
         if self.private_task:
             tasks_to_cancel.append(self.private_task)
 
-        # إلغاء المهام
         for task in tasks_to_cancel:
-            task.cancel()
+            try:
+                task.cancel()
+            except Exception:
+                pass
         
-        # الانتظار حتى يتم تأكيد إلغاء جميع المهام
         await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-
         logger.info("WebSocket Manager stopped gracefully.")
-
-    logger.info("WebSocket Manager stopped gracefully.")
 # =======================================================================================
 
  async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
