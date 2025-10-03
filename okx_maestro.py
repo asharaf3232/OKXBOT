@@ -1357,15 +1357,28 @@ class OKXWebSocketManager:
             await self.sync_subscriptions()
 
     async def sync_subscriptions(self):
-        async with aiosqlite.connect(DB_FILE) as conn:
-            active_symbols = {row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()}
+    async with aiosqlite.connect(DB_FILE) as conn:
+        active_symbols = {row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()}
 
-        if active_symbols != self.public_subscriptions:
-            logger.info(f"OKX WebSocket Manager: Syncing subscriptions. Old: {len(self.public_subscriptions)}, New: {len(active_symbols)}")
-            self.public_subscriptions = active_symbols
-            if self.public_ws and not self.public_ws.closed:
-                try: await self.public_ws.close(code=1000, reason='Subscription change')
-                except Exception: pass
+    if active_symbols != self.public_subscriptions:
+        logger.info(f"OKX WebSocket Manager: Syncing subscriptions. Old: {len(self.public_subscriptions)}, New: {len(active_symbols)}")
+        self.public_subscriptions = active_symbols
+        # إعادة الاشتراك عبر إغلاق وإعادة فتح الاتصال
+        
+        # --- [✅ هذا هو التعديل الجوهري] ---
+        # نستخدم .open للتحقق مما إذا كان الاتصال مفتوحًا
+        if self.public_ws and self.public_ws.open:
+            try: 
+                await self.public_ws.close(code=1000, reason='Subscription change')
+            except Exception: 
+                pass
+        
+        # نطبق نفس التعديل على الاتصال الخاص أيضًا
+        if self.private_ws and self.private_ws.open:
+            try: 
+                await self.private_ws.close(code=1000, reason='Subscription change')
+            except Exception: 
+                pass
             # لا داعي لإعادة تشغيل الاتصال الخاص لأنه لا يعتمد على الرموز النشطة
             
     async def stop(self):
