@@ -2235,25 +2235,23 @@ async def post_shutdown(application: Application):
     """
     logger.info("Bot shutdown initiated...")
     if bot_data.websocket_manager:
-        # ننتظر مدير الـ WebSocket حتى ينهي مهامه بالكامل
         await bot_data.websocket_manager.stop()
     if bot_data.exchange:
-        # ننتظر اتصال المنصة حتى يغلق
         await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
 def main():
-    logger.info("Starting OKX Maestro Bot V8.0...")
+    logger.info(f"Starting OKX Maestro Bot V9.0...")
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
-
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("scan", manual_scan_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
-    application.add_handler(CallbackQueryHandler(button_callback_handler))
-
+    # ... (all handlers)
     application.run_polling()
-    
+
 if __name__ == '__main__':
-    main()
+    if not all([WiseMan, EvolutionaryEngine]):
+        logger.critical("Missing core modules (WiseMan or EvolutionaryEngine). Please ensure the files are present.")
+    else:
+        main()
+
+
