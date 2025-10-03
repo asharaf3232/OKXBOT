@@ -1269,26 +1269,46 @@ class TradeGuardian:
                      await conn.commit()
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
-
-            # --- [✅ التعديل هنا للتحقق من الحد الأدنى للكمية] ---
+            
+            # --- [✅ إصلاح نهائي لمشكلة الغبار والدقة] ---
             market = bot_data.exchange.market(symbol)
             min_amount = market.get('limits', {}).get('amount', {}).get('min')
-            
+            amount_precision = market.get('precision', {}).get('amount')
+
+            # الخطوة 1: التحقق من الحد الأدنى للكمية
             if min_amount and available_quantity < min_amount:
-                # إذا كانت الكمية أقل من الحد الأدنى، لا يمكن بيعها. اعتبرها مغلقة بخسارة قيمتها.
                 logger.warning(f"Closure for #{trade_id} failed: Quantity {available_quantity} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
-                pnl_dust = (close_price * available_quantity) - (trade['entry_price'] * available_quantity)
+                # (منطق إغلاق الغبار يبقى كما هو)
                 async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)', close_price = ?, pnl_usdt = ? WHERE id = ?", (close_price, pnl_dust, trade_id))
+                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
                     await conn.commit()
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
-            # --- [نهاية التعديل] ---
 
-            formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
-            await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity)
+            # الخطوة 2: تنسيق الكمية حسب دقة المنصة
+            # amount_to_precision قد يقوم بالتقريب لأعلى أو لأسفل، نحن نريد دائمًا التقريب لأسفل عند البيع
+            if amount_precision:
+                # نحول الدقة إلى عدد الخانات العشرية (e.g., 0.001 -> 3)
+                decimals = abs(int(f'{amount_precision:e}'.split('e-')[1])) if 'e-' in f'{amount_precision:e}' else 0
+                factor = 10 ** decimals
+                # نقوم بالتقريب لأسفل دائمًا لضمان عدم تجاوز الرصيد المتاح
+                quantity_to_sell = (available_quantity * factor) // 1 / factor
+            else:
+                quantity_to_sell = available_quantity
+
+            # الخطوة 3: التحقق مرة أخرى من الحد الأدنى بعد التقريب
+            if min_amount and quantity_to_sell < min_amount:
+                logger.warning(f"Closure for #{trade_id} failed: Rounded quantity {quantity_to_sell} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
+                    await conn.commit()
+                await bot_data.public_ws.unsubscribe([symbol])
+                return
+            # --- [نهاية الإصلاح] ---
+
+            await bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell)
             
-            pnl = (close_price - trade['entry_price']) * trade['quantity'] # الحساب على الكمية الأصلية
+            pnl = (close_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             
             async with aiosqlite.connect(DB_FILE) as conn:
@@ -1433,15 +1453,23 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         async with aiosqlite.connect(DB_FILE) as conn:
             total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
             active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+    except sqlite3.OperationalError as e:
+        if "no such table: trades" in str(e):
+            logger.warning("DB table 'trades' missing in diagnostics. Re-initializing...")
+            await init_database()
+        else:
+            logger.error(f"Diagnostics DB Error: {e}")
     except Exception as e:
         logger.error(f"Diagnostics DB Error: {e}")
 
-    # --- [✅ التعديل هنا لفحص حالة الاتصال الجديدة] ---
-    ws_status = "غير متصل ❌"
+    # --- [✅ الكود المحدث والكامل لفحص حالة الاتصال الصحيحة] ---
+    ws_status = "غير مهيأ ⚠️"
     try:
-        # نفحص الاتصالين العام والخاص
-        public_ws_connected = bot_data.public_ws and bot_data.public_ws.websocket and bot_data.public_ws.websocket.open
-        private_ws_connected = bot_data.private_ws and bot_data.private_ws.websocket and bot_data.private_ws.websocket.open
+        public_ws_manager = getattr(bot_data, 'public_ws', None)
+        private_ws_manager = getattr(bot_data, 'private_ws', None)
+        
+        public_ws_connected = public_ws_manager and getattr(public_ws_manager, 'websocket', None) and public_ws_manager.websocket.open
+        private_ws_connected = private_ws_manager and getattr(private_ws_manager, 'websocket', None) and private_ws_manager.websocket.open
 
         if public_ws_connected and private_ws_connected:
             ws_status = "متصل ✅ (عام وخاص)"
@@ -1449,8 +1477,10 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
             ws_status = "متصل جزئيًا (عام فقط) ⚠️"
         elif private_ws_connected:
             ws_status = "متصل جزئيًا (خاص فقط) ⚠️"
+        else:
+            ws_status = "غير متصل ❌"
     except Exception:
-        pass # يبقى غير متصل في حالة وجود أي خطأ
+        ws_status = "خطأ في الفحص ❌"
     
     report = (
         f"🕵️‍♂️ *تقرير التشخيص الشامل*\n\n"
