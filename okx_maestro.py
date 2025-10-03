@@ -1379,9 +1379,9 @@ class OKXWebSocketManager:
                 except Exception: pass
 
     async def stop(self):
-    """
+   
     [تم التعديل] يوقف جميع اتصالات ومهام WebSocket بأمان.
-    """
+   
     self.is_running = False
     
     # قائمة بالمهام التي تحتاج إلى إلغاء
@@ -1402,9 +1402,9 @@ class OKXWebSocketManager:
 # =======================================================================================
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-    """
+   
     المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
-    """
+    
     logger.info("🕵️ Supervisor: Running audit and recovery checks...")
 
     async with aiosqlite.connect(DB_FILE) as conn:
