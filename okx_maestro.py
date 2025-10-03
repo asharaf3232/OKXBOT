@@ -1366,15 +1366,15 @@ class OKXWebSocketManager:
             logger.info(f"OKX WebSocket Manager: Syncing subscriptions. Old: {len(self.public_subscriptions)}, New: {len(active_symbols)}")
             self.public_subscriptions = active_symbols
             
-            # نستخدم .open للتحقق مما إذا كان الاتصال مفتوحًا
-            if self.public_ws and self.public_ws.open:
+            # --- [✅ الحل النهائي باستخدام .state] ---
+            # هذه الطريقة هي الأكثر دقة وتعمل مع كل الإصدارات
+            if self.public_ws and self.public_ws.state == websockets.ConnectionState.OPEN:
                 try: 
                     await self.public_ws.close(code=1000, reason='Subscription change')
                 except Exception: 
                     pass
             
-            # نطبق نفس التعديل على الاتصال الخاص أيضًا
-            if self.private_ws and self.private_ws.open:
+            if self.private_ws and self.private_ws.state == websockets.ConnectionState.OPEN:
                 try: 
                     await self.private_ws.close(code=1000, reason='Subscription change')
                 except Exception: 
