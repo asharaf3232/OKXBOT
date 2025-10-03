@@ -1270,10 +1270,25 @@ class TradeGuardian:
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
 
+            # --- [✅ التعديل هنا للتحقق من الحد الأدنى للكمية] ---
+            market = bot_data.exchange.market(symbol)
+            min_amount = market.get('limits', {}).get('amount', {}).get('min')
+            
+            if min_amount and available_quantity < min_amount:
+                # إذا كانت الكمية أقل من الحد الأدنى، لا يمكن بيعها. اعتبرها مغلقة بخسارة قيمتها.
+                logger.warning(f"Closure for #{trade_id} failed: Quantity {available_quantity} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
+                pnl_dust = (close_price * available_quantity) - (trade['entry_price'] * available_quantity)
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)', close_price = ?, pnl_usdt = ? WHERE id = ?", (close_price, pnl_dust, trade_id))
+                    await conn.commit()
+                await bot_data.public_ws.unsubscribe([symbol])
+                return
+            # --- [نهاية التعديل] ---
+
             formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
             await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity)
             
-            pnl = (close_price - trade['entry_price']) * trade['quantity']
+            pnl = (close_price - trade['entry_price']) * trade['quantity'] # الحساب على الكمية الأصلية
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             
             async with aiosqlite.connect(DB_FILE) as conn:
@@ -1289,18 +1304,16 @@ class TradeGuardian:
             await safe_send_message(bot, msg)
 
         except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as e:
-            logger.warning(f"Closure for #{trade_id} failed due to exchange rules (e.g., dust), moving to incubator: {e}", extra=log_ctx)
+            logger.warning(f"Closure for #{trade_id} failed due to exchange rules, moving to incubator: {e}", extra=log_ctx)
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
                 await conn.commit()
-            await bot_data.public_ws.unsubscribe([symbol])
         except Exception as e:
             logger.critical(f"CRITICAL: Final closure attempt for #{trade_id} failed unexpectedly: {e}", exc_info=True, extra=log_ctx)
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
                 await conn.commit()
             await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
-
     async def sync_subscriptions(self):
         try:
             async with aiosqlite.connect(DB_FILE) as conn:
@@ -1420,23 +1433,24 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         async with aiosqlite.connect(DB_FILE) as conn:
             total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
             active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
-    except sqlite3.OperationalError as e:
-        if "no such table: trades" in str(e):
-            logger.warning("DB table 'trades' missing in diagnostics. Re-initializing...")
-            await init_database()
-        else:
-            logger.error(f"Diagnostics DB Error: {e}")
+    except Exception as e:
+        logger.error(f"Diagnostics DB Error: {e}")
 
+    # --- [✅ التعديل هنا لفحص حالة الاتصال الجديدة] ---
     ws_status = "غير متصل ❌"
-    if bot_data.websocket_manager:
-        public_ws_open = bot_data.websocket_manager.public_ws and not bot_data.websocket_manager.public_ws.closed
-        private_ws_open = bot_data.websocket_manager.private_ws and not bot_data.websocket_manager.private_ws.closed
-        if public_ws_open and private_ws_open:
+    try:
+        # نفحص الاتصالين العام والخاص
+        public_ws_connected = bot_data.public_ws and bot_data.public_ws.websocket and bot_data.public_ws.websocket.open
+        private_ws_connected = bot_data.private_ws and bot_data.private_ws.websocket and bot_data.private_ws.websocket.open
+
+        if public_ws_connected and private_ws_connected:
             ws_status = "متصل ✅ (عام وخاص)"
-        elif public_ws_open:
-            ws_status = "متصل ✅ (عام فقط)"
-        elif private_ws_open:
-            ws_status = "متصل ✅ (خاص فقط)"
+        elif public_ws_connected:
+            ws_status = "متصل جزئيًا (عام فقط) ⚠️"
+        elif private_ws_connected:
+            ws_status = "متصل جزئيًا (خاص فقط) ⚠️"
+    except Exception:
+        pass # يبقى غير متصل في حالة وجود أي خطأ
     
     report = (
         f"🕵️‍♂️ *تقرير التشخيص الشامل*\n\n"
@@ -1463,7 +1477,6 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         f"----------------------------------"
     )
     await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
-
 # --- (بقية دوال الواجهة مثل show_trades_command, show_parameters_menu, etc.) ---
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
