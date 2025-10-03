@@ -1391,65 +1391,54 @@ class OKXWebSocketManager:
 # =======================================================================================
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-   
-   # المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
-    
+    """
+    المشرف: يعالج الصفقات العالقة ويطلب من الحارس إعادة محاولة إغلاق صفقات الحضانة.
+    """
     logger.info("🕵️ Supervisor: Running audit and recovery checks...")
 
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
 
         # --- شبكة الأمان للصفقات العالقة في حالة Pending ---
-        total_pending_cursor = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'pending'")
-        total_pending_count = (await total_pending_cursor.fetchone())[0]
-        if total_pending_count > 0:
-            logger.info(f"Supervisor Diagnostics: Found {total_pending_count} total trades in 'pending' status.")
+        try:
+            total_pending_cursor = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'pending'")
+            total_pending_count = (await total_pending_cursor.fetchone())[0]
+            if total_pending_count > 0:
+                logger.info(f"Supervisor Diagnostics: Found {total_pending_count} total trades in 'pending' status.")
 
-        stuck_threshold_time = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
-        stuck_pending_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp < ?", (stuck_threshold_time,))).fetchall()
+            stuck_threshold_time = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
+            stuck_pending_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp < ?", (stuck_threshold_time,))).fetchall()
 
-        if stuck_pending_trades:
-            logger.warning(f"🕵️ Supervisor: Found {len(stuck_pending_trades)} STUCK pending trades. Verifying status...")
-            for trade_data in stuck_pending_trades:
-                trade = dict(trade_data)
-                try:
-                    order_status = await bot_data.exchange.fetch_order(trade['order_id'], trade['symbol'])
-                    if order_status['status'] == 'closed' or order_status.get('filled', 0) > 0:
-                        await activate_trade(trade['order_id'], trade['symbol'])
-                    elif order_status['status'] in ['canceled', 'expired']:
+            if stuck_pending_trades:
+                logger.warning(f"🕵️ Supervisor: Found {len(stuck_pending_trades)} STUCK pending trades. Verifying status...")
+                for trade_data in stuck_pending_trades:
+                    trade = dict(trade_data)
+                    try:
+                        order_status = await bot_data.exchange.fetch_order(trade['order_id'], trade['symbol'])
+                        if order_status['status'] == 'closed' or order_status.get('filled', 0) > 0:
+                            await activate_trade(trade['order_id'], trade['symbol'])
+                        elif order_status['status'] in ['canceled', 'expired']:
+                            await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
+                        await asyncio.sleep(2)
+                    except ccxt.OrderNotFound:
                         await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
-                    await asyncio.sleep(2)
-                except ccxt.OrderNotFound:
-                    await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
-                except Exception as e:
-                    logger.error(f"🕵️ Supervisor: Error processing stuck pending trade #{trade['id']}: {e}")
+                    except Exception as e:
+                        logger.error(f"🕵️ Supervisor: Error processing stuck pending trade #{trade['id']}: {e}")
 
-        # --- إدارة الصفقات في الحضانة ---
-        incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
-        if incubated_trades:
-            logger.warning(f"🕵️ Supervisor: Found {len(incubated_trades)} trades in incubator...")
-            for trade_data in incubated_trades:
-                trade = dict(trade_data)
-                try:
-                    await conn.execute("UPDATE trades SET status = 'retry_exit' WHERE id = ?", (trade['id'],))
-                except Exception as e:
-                    logger.error(f"🕵️ Supervisor: Error processing incubated trade #{trade['id']}: {e}")
+            # --- إدارة الصفقات في الحضانة ---
+            incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
+            if incubated_trades:
+                logger.warning(f"🕵️ Supervisor: Found {len(incubated_trades)} trades in incubator...")
+                for trade_data in incubated_trades:
+                    trade = dict(trade_data)
+                    try:
+                        await conn.execute("UPDATE trades SET status = 'retry_exit' WHERE id = ?", (trade['id'],))
+                    except Exception as e:
+                        logger.error(f"🕵️ Supervisor: Error processing incubated trade #{trade['id']}: {e}")
 
-        await conn.commit()
-
-    logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
-        # --- إدارة الصفقات في الحضانة ---
-        incubated_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'incubated'")).fetchall()
-        if incubated_trades:
-            logger.warning(f"🕵️ Supervisor: Found {len(incubated_trades)} trades in incubator...")
-            for trade_data in incubated_trades:
-                trade = dict(trade_data)
-                try:
-                    await conn.execute("UPDATE trades SET status = 'retry_exit' WHERE id = ?", (trade['id'],))
-                except Exception as e:
-                    logger.error(f"🕵️ Supervisor: Error processing incubated trade #{trade['id']}: {e}")
-
-        await conn.commit()
+            await conn.commit()
+        except Exception as e:
+            logger.error(f"Supervisor DB Error: {e}")
 
     logger.info("🕵️ Supervisor: Audit and recovery checks complete.")
 
