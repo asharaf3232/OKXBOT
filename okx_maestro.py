@@ -243,6 +243,20 @@ async def init_database():
         logger.info("Starting DB init...")
         async with aiosqlite.connect(DB_FILE) as conn:
             await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0, trade_weight REAL DEFAULT 1.0)')
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS trade_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    symbol TEXT,
+                    reason TEXT,
+                    status TEXT DEFAULT 'pending',
+                    entry_price REAL,
+                    take_profit REAL,
+                    stop_loss REAL,
+                    signal_strength INTEGER,
+                    trade_weight REAL DEFAULT 1.0
+                )
+            """)
             await conn.commit()
             cursor = await conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in await cursor.fetchall()]
@@ -875,6 +889,22 @@ async def initiate_real_trade(signal):
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
 
+async def log_candidate_to_db(signal):
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            # Check if a pending candidate for this symbol already exists
+            exists = await (await conn.execute("SELECT 1 FROM trade_candidates WHERE symbol = ? AND status = 'pending'", (signal['symbol'],))).fetchone()
+            if not exists:
+                await conn.execute("""
+                    INSERT INTO trade_candidates (timestamp, symbol, reason, entry_price, take_profit, stop_loss, signal_strength, trade_weight)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (datetime.now(EGYPT_TZ).isoformat(), signal['symbol'], signal['reason'], signal['entry_price'],
+                      signal['take_profit'], signal['stop_loss'], signal.get('strength', 1), signal.get('weight', 1.0)))
+                await conn.commit()
+                logger.info(f"New trade candidate logged for {signal['symbol']} for Wise Man review.")
+    except Exception as e:
+        logger.error(f"Failed to log candidate for {signal['symbol']}: {e}")
+
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if not bot_data.trading_enabled:
@@ -927,57 +957,13 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         await queue.join()
         for task in worker_tasks: task.cancel()
 
-        trades_opened_count = 0
-        signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
+        # --- New Logic: Log all found signals as candidates ---
+        if signals_found:
+            logger.info(f"Scan found {len(signals_found)} new candidates. Logging them for the Wise Man to review.")
+            for signal in signals_found:
+                await log_candidate_to_db(signal)
 
-        # --- [الحل النهائي لمشكلة سباق الشراء V6.7] ---
-        balance_lock = asyncio.Lock()
-        available_slots = settings['max_concurrent_trades'] - active_trades_count
-        symbols_being_traded_in_this_scan = set()
-
-        for signal in signals_found:
-            if available_slots <= 0:
-                logger.info("Stopping trade initiation, max concurrent trade slots filled for this cycle.")
-                break
-
-            symbol_to_trade = signal['symbol']
-
-            if symbol_to_trade in symbols_being_traded_in_this_scan:
-                logger.warning(f"Signal for {symbol_to_trade} ignored: A trade for this symbol is already being processed in THIS scan cycle.")
-                continue
-
-            if await has_active_trade_for_symbol(symbol_to_trade):
-                logger.info(f"Signal for {symbol_to_trade} ignored: An active trade for this symbol already exists in the database.")
-                continue
-
-            if time.time() - bot_data.last_signal_time.get(symbol_to_trade, 0) > (SCAN_INTERVAL_SECONDS * 0.9):
-                async with balance_lock:
-                    try:
-                        # التحقق من الرصيد الفعلي مباشرة قبل إرسال الأمر
-                        balance = await bot_data.exchange.fetch_balance()
-                        usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-                        required_size = settings['real_trade_size_usdt']
-
-                        if usdt_balance >= required_size:
-                            logger.info(f"Balance OK ({usdt_balance:.2f} USDT). Proceeding with trade for {symbol_to_trade}.")
-                            bot_data.last_signal_time[symbol_to_trade] = time.time()
-                            symbols_being_traded_in_this_scan.add(symbol_to_trade)
-
-                            if await initiate_real_trade(signal):
-                                trades_opened_count += 1
-                                available_slots -= 1 # تقليل عدد الصفقات المتاحة لهذه الدورة
-                            else:
-                                symbols_being_traded_in_this_scan.remove(symbol_to_trade)
-
-                            await asyncio.sleep(2) # إعطاء فرصة للمنصة لتحديث الرصيد
-                        else:
-                            logger.warning(f"Stopping trade search: Insufficient final balance for {symbol_to_trade} ({usdt_balance:.2f} USDT).")
-                            # نوقف البحث عن صفقات جديدة إذا لم يعد هناك رصيد
-                            break 
-                    except Exception as e:
-                        logger.error(f"Error during balance check for {symbol_to_trade}: {e}")
-        # --- [نهاية الحل] ---
-
+        trades_opened_count = 0 # We no longer open trades here
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
         await safe_send_message(bot, f"✅ **فحص السوق اكتمل بنجاح**\n"
@@ -1192,12 +1178,18 @@ class TradeGuardian:
                     settings = bot_data.settings
 
                     # --- [Main Closing Logic] ---
-                    if current_price <= trade['stop_loss']:
-                        await self._close_trade(trade, "فاشلة (SL)", current_price)
-                        return
                     if current_price >= trade['take_profit']:
                         await self._close_trade(trade, "ناجحة (TP)", current_price)
                         return
+                    
+                    if current_price <= trade['stop_loss']:
+                        # This is the new hand-off logic
+                        logger.warning(f"Trade #{trade['id']} for {trade['symbol']} hit its Stop Loss. Handing off to Wise Man for final confirmation.")
+                        async with aiosqlite.connect(DB_FILE) as conn:
+                            # We only flag active trades to prevent race conditions
+                            cursor = await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
+                            await conn.commit()
+                        return # Exit immediately to let the Wise Man take over
                     
                     # --- [Active Trade Management Logic] ---
                     
@@ -2164,6 +2156,11 @@ async def post_init(application: Application):
     # --- End of New Engine Init ---
 
     jq = application.job_queue
+    # --- [ADD THIS NEW LINE] ---
+    # Schedule the Wise Man's new real-time decision engine to run every 10 seconds
+    jq.run_repeating(wise_man.run_realtime_review, interval=10, first=5, name="wise_man_realtime_engine")
+    # --------------------------
+
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
