@@ -1175,92 +1175,92 @@ class TradeGuardian:
         self.application = application
 
     # --- الكود الكامل والصحيح للدالة ---
-async def handle_ticker_update(self, ticker_data):
-    async with trade_management_lock:
-        symbol = ticker_data['instId'].replace('-', '/')
-        current_price = float(ticker_data['last'])
-        
-        try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                conn.row_factory = aiosqlite.Row
-                trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
-                
-                if not trade:
-                    return
-
-                trade = dict(trade)
-                settings = bot_data.settings
-
-                # --- [Main Closing Logic] ---
-                if current_price >= trade['take_profit']:
-                    await self._close_trade(trade, "ناجحة (TP)", current_price)
-                    return
-                
-                if current_price <= trade['stop_loss']:
-                    logger.warning(f"Trade #{trade['id']} for {trade['symbol']} hit its Stop Loss. Handing off to Wise Man for final confirmation.")
-                    # لا نحتاج لفتح اتصال جديد، نحن بالفعل داخل اتصال
-                    await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
-                    await conn.commit()
-                    return
-
-                # --- [Active Trade Management Logic] ---
-                
-                # 1. Update highest price
-                highest_price = max(trade.get('highest_price', 0), current_price)
-                if highest_price > trade.get('highest_price', 0):
-                    await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
-
-                # 2. Trailing Stop Loss Logic
-                if settings.get('trailing_sl_enabled', True):
-                    # Trailing Stop Loss Activation Notification
-                    if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
-                        new_sl = trade['entry_price'] * 1.001
-                        if new_sl > trade['stop_loss']:
-                            await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                            await conn.commit()
-                            await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
+    async def handle_ticker_update(self, ticker_data):
+        async with trade_management_lock:
+            symbol = ticker_data['instId'].replace('-', '/')
+            current_price = float(ticker_data['last'])
+            
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
                     
-                    # Trailing Stop Loss Adjustment
-                    # يجب أن نقرأ الصفقة مرة أخرى من قاعدة البيانات لضمان أننا نستخدم أحدث قيمة للـ SL
-                    trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
-                    if trade_after_activation and trade_after_activation['trailing_sl_active']:
-                        new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                        if new_sl_candidate > trade_after_activation['stop_loss']:
-                            await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                    if not trade:
+                        return
 
-                # 3. Incremental Profit Notifications
-                if settings.get('incremental_notifications_enabled', True):
-                    last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
-                    increment_percent = settings.get('incremental_notification_percent', 2.0)
-                    next_notification_target = last_notified_price * (1 + increment_percent / 100)
+                    trade = dict(trade)
+                    settings = bot_data.settings
+
+                    # --- [Main Closing Logic] ---
+                    if current_price >= trade['take_profit']:
+                        await self._close_trade(trade, "ناجحة (TP)", current_price)
+                        return
                     
-                    if current_price >= next_notification_target:
-                        final_notified_price = last_notified_price
-                        while current_price >= next_notification_target:
-                            final_notified_price = next_notification_target
-                            next_notification_target = final_notified_price * (1 + increment_percent / 100)
+                    if current_price <= trade['stop_loss']:
+                        logger.warning(f"Trade #{trade['id']} for {trade['symbol']} hit its Stop Loss. Handing off to Wise Man for final confirmation.")
+                        # لا نحتاج لفتح اتصال جديد، نحن بالفعل داخل اتصال
+                        await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
+                        await conn.commit()
+                        return
+
+                    # --- [Active Trade Management Logic] ---
+                    
+                    # 1. Update highest price
+                    highest_price = max(trade.get('highest_price', 0), current_price)
+                    if highest_price > trade.get('highest_price', 0):
+                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+
+                    # 2. Trailing Stop Loss Logic
+                    if settings.get('trailing_sl_enabled', True):
+                        # Trailing Stop Loss Activation Notification
+                        if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                            new_sl = trade['entry_price'] * 1.001
+                            if new_sl > trade['stop_loss']:
+                                await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                                await conn.commit()
+                                await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
                         
-                        profit_percent = ((current_price / trade['entry_price']) - 1) * 100
-                        await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
-                        await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
+                        # Trailing Stop Loss Adjustment
+                        # يجب أن نقرأ الصفقة مرة أخرى من قاعدة البيانات لضمان أننا نستخدم أحدث قيمة للـ SL
+                        trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                        if trade_after_activation and trade_after_activation['trailing_sl_active']:
+                            new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                            if new_sl_candidate > trade_after_activation['stop_loss']:
+                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
-                # 4. Wise Guardian & Wise Man call for cutting losses (This logic seems to belong to the WiseMan's tactical review, but we'll leave it here if it's intended)
-                if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
-                    drawdown_pct = ((current_price / highest_price) - 1) * 100
-                    trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
-                    if drawdown_pct < trigger_pct:
-                        cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
-                        last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
-                        if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
-                            bot_data.last_deep_analysis_time[trade['id']] = time.time()
-                            # This part is complex, assuming wise_man and perform_deep_analysis exist
-                            # if 'wise_man' in globals() and wise_man and hasattr(wise_man, 'perform_deep_analysis'):
-                            #     asyncio.create_task(wise_man.perform_deep_analysis(trade))
-                
-                await conn.commit()
+                    # 3. Incremental Profit Notifications
+                    if settings.get('incremental_notifications_enabled', True):
+                        last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
+                        increment_percent = settings.get('incremental_notification_percent', 2.0)
+                        next_notification_target = last_notified_price * (1 + increment_percent / 100)
+                        
+                        if current_price >= next_notification_target:
+                            final_notified_price = last_notified_price
+                            while current_price >= next_notification_target:
+                                final_notified_price = next_notification_target
+                                next_notification_target = final_notified_price * (1 + increment_percent / 100)
+                            
+                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
 
-        except Exception as e:
-            logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+                    # 4. Wise Guardian & Wise Man call for cutting losses (This logic seems to belong to the WiseMan's tactical review, but we'll leave it here if it's intended)
+                    if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
+                        drawdown_pct = ((current_price / highest_price) - 1) * 100
+                        trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
+                        if drawdown_pct < trigger_pct:
+                            cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
+                            last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
+                            if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
+                                bot_data.last_deep_analysis_time[trade['id']] = time.time()
+                                # This part is complex, assuming wise_man and perform_deep_analysis exist
+                                # if 'wise_man' in globals() and wise_man and hasattr(wise_man, 'perform_deep_analysis'):
+                                #     asyncio.create_task(wise_man.perform_deep_analysis(trade))
+                    
+                    await conn.commit()
+
+            except Exception as e:
+                logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
