@@ -93,8 +93,7 @@ class WiseMan:
     # ==============================================================================
     # --- 2. منطق "نقطة الخروج الرائعة" (جزء من المحرك السريع) ---
     # ==============================================================================
-    async def _review_pending_exits(self):
-    async with aiosqlite.connect(self.db_file) as conn:
+        async with aiosqlite.connect(self.db_file) as conn:
         conn.row_factory = aiosqlite.Row
         trades_to_review = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending_exit_confirmation'")).fetchall()
 
