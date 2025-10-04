@@ -614,7 +614,7 @@ async def get_market_mood():
     if settings.get('btc_trend_filter_enabled', True):
         try:
             htf_period = settings['trend_filters']['htf_period']
-            ohlcv = await safe_api_call(bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5))
+            ohlcv = await safe_api_call(lambda: bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5))
             if not ohlcv: return {"mood": "DANGEROUS", "reason": "فشل جلب بيانات BTC (API Error)", "btc_mood": "UNKNOWN"}
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['sma'] = ta.sma(df['close'], length=htf_period)
@@ -650,7 +650,7 @@ def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
 
 async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol):
     try:
-        ohlcv_1h = await safe_api_call(exchange.fetch_ohlcv(symbol, '1h', limit=100))
+        ohlcv_1h = await safe_api_call(lambda: exchange.fetch_ohlcv(symbol, '1h', limit=100))
         if not ohlcv_1h or len(ohlcv_1h) < 50: return None
         df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         current_price = df_1h['close'].iloc[-1]
@@ -681,7 +681,7 @@ def analyze_sniper_pro(df, params, rvol, adx_value):
 
 async def analyze_whale_radar(df, params, rvol, adx_value, exchange, symbol):
     try:
-        ob = await safe_api_call(exchange.fetch_order_book(symbol, limit=20))
+        ob = await safe_api_call(lambda: exchange.fetch_order_book(symbol, limit=20))
         if not ob or not ob.get('bids'): return None
         if sum(float(price) * float(qty) for price, qty in ob['bids'][:10]) > 30000:
             return {"reason": "whale_radar"}
@@ -731,7 +731,7 @@ async def get_okx_markets():
     if time.time() - bot_data.last_markets_fetch > 300:
         try:
             logger.info("Fetching and caching all OKX markets..."); 
-            all_tickers = await safe_api_call(bot_data.exchange.fetch_tickers())
+            all_tickers = await safe_api_call(lambda: bot_data.exchange.fetch_tickers())
             if not all_tickers: return []
             bot_data.all_markets = list(all_tickers.values()); bot_data.last_markets_fetch = time.time()
         except Exception as e: logger.error(f"Failed to fetch all markets: {e}"); return []
@@ -741,7 +741,7 @@ async def get_okx_markets():
     return valid_markets[:settings['top_n_symbols_by_volume']]
 
 async def fetch_ohlcv_batch(exchange, symbols, timeframe, limit):
-    tasks = [safe_api_call(exchange.fetch_ohlcv(s, timeframe, limit=limit)) for s in symbols]
+    tasks = [safe_api_call(lambda s=s: exchange.fetch_ohlcv(s, timeframe, limit=limit)) for s in symbols]
     results = await asyncio.gather(*tasks)
     return {symbols[i]: results[i] for i in range(len(symbols)) if results[i] is not None}
 
@@ -759,7 +759,7 @@ async def worker_batch(queue, signals_list, errors_list):
             if len(df) < 50:
                 queue.task_done(); continue
 
-            orderbook = await safe_api_call(exchange.fetch_order_book(symbol, limit=1))
+            orderbook = await safe_api_call(lambda: exchange.fetch_order_book(symbol, limit=1))
             if not orderbook or not orderbook['bids'] or not orderbook['asks']:
                 queue.task_done(); continue
 
@@ -785,7 +785,7 @@ async def worker_batch(queue, signals_list, errors_list):
 
             is_htf_bullish = True
             if settings.get('multi_timeframe_enabled', True):
-                ohlcv_htf = await safe_api_call(exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220))
+                ohlcv_htf = await safe_api_call(lambda: exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220))
                 if ohlcv_htf and len(ohlcv_htf) > 200:
                     df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df_htf.ta.ema(length=200, append=True)
@@ -892,7 +892,7 @@ async def activate_trade(order_id, symbol):
     """
     bot = bot_data.application.bot
     try:
-        order_details = await safe_api_call(bot_data.exchange.fetch_order(order_id, symbol))
+        order_details = await safe_api_call(lambda: bot_data.exchange.fetch_order(order_id, symbol))
         if not order_details:
              logger.error(f"Could not fetch order details for activation of {order_id}: API call failed.")
              return
@@ -931,7 +931,7 @@ async def activate_trade(order_id, symbol):
 
     await bot_data.websocket_manager.sync_subscriptions()
     
-    balance_after = await safe_api_call(bot_data.exchange.fetch_balance())
+    balance_after = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
     usdt_remaining = balance_after.get('USDT', {}).get('free', 0) if balance_after else 0
     trade_cost = filled_price * net_filled_quantity
     tp_percent = (new_take_profit / filled_price - 1) * 100
@@ -1022,7 +1022,7 @@ async def initiate_real_trade(signal, settings, exchange, bot):
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
         
-        buy_order = await safe_api_call(exchange.create_market_buy_order(signal['symbol'], formatted_amount))
+        buy_order = await safe_api_call(lambda: exchange.create_market_buy_order(signal['symbol'], formatted_amount))
         if not buy_order: return False
 
         if await log_pending_trade_to_db(signal, buy_order):
@@ -1341,7 +1341,7 @@ class TradeGuardian:
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
             
-            market = await safe_api_call(bot_data.exchange.market(symbol))
+            market = await safe_api_call(lambda: bot_data.exchange.market(symbol))
             if not market: return
             min_amount = market.get('limits', {}).get('amount', {}).get('min')
             amount_precision = market.get('precision', {}).get('amount')
@@ -1369,7 +1369,7 @@ class TradeGuardian:
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
 
-            await safe_api_call(bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell))
+            await safe_api_call(lambda: bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell))
             
             pnl = (close_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
@@ -1451,7 +1451,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
             order_id, symbol = trade['order_id'], trade['symbol']
             logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
             try:
-                order_status = await safe_api_call(bot_data.exchange.fetch_order(order_id, symbol))
+                order_status = await safe_api_call(lambda: bot_data.exchange.fetch_order(order_id, symbol))
                 if not order_status: continue
                 if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
                     await activate_trade(order_id, symbol)
@@ -1469,7 +1469,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
             trade = dict(trade_data)
             logger.warning(f"🚨 Supervisor: Found failed closure for trade #{trade['id']}. Retrying intervention.")
             try:
-                ticker = await safe_api_call(bot_data.exchange.fetch_ticker(trade['symbol']))
+                ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
                 if ticker:
                     current_price = ticker.get('last')
                     if current_price:
@@ -1715,7 +1715,7 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         keyboard = [[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]]
     else:
         try:
-            ticker = await safe_api_call(bot_data.exchange.fetch_ticker(trade['symbol']))
+            ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
             if not ticker: raise Exception("Failed to fetch ticker")
             current_price = ticker['last']
             pnl = (current_price - trade['entry_price']) * trade['quantity']
@@ -1829,7 +1829,7 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer("جاري جلب بيانات المحفظة...")
     try:
-        balance = await safe_api_call(bot_data.exchange.fetch_balance())
+        balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
         if not balance:
             await safe_edit_message(query, "حدث خطأ أثناء جلب رصيد المحفظة.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]))
             return
@@ -1839,7 +1839,7 @@ async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         assets_to_fetch = [f"{asset}/USDT" for asset in owned_assets if asset != 'USDT']
         tickers = {}
         if assets_to_fetch:
-            try: tickers = await safe_api_call(bot_data.exchange.fetch_tickers(assets_to_fetch))
+            try: tickers = await safe_api_call(lambda: bot_data.exchange.fetch_tickers(assets_to_fetch))
             except Exception as e: logger.warning(f"Could not fetch all tickers for portfolio: {e}")
         
         asset_details = []; total_assets_value_usdt = 0
@@ -2166,7 +2166,7 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
             return
 
         trade = dict(trade)
-        ticker = await safe_api_call(bot_data.exchange.fetch_ticker(trade['symbol']))
+        ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
         if not ticker:
             await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: تعذر جلب السعر الحالي.")
             await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
