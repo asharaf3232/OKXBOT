@@ -152,7 +152,7 @@ class WiseMan:
                     df['ema_slow'] = ta.ema(df['close'], length=30)
                     is_weak = current_price < df['ema_fast'].iloc[-1] and current_price < df['ema_slow'].iloc[-1]
 
-                    if is_weak and btc_momentum_is_negative:
+                    if is_weak and btc_momentum_is_negative and current_price < trade['entry_price']:
                         logger.warning(f"Wise Man proactively detected weakness in trade #{trade['id']} for {symbol}. Requesting exit confirmation.")
                         await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ?", (trade['id'],))
                         await conn.commit()
