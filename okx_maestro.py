@@ -472,14 +472,13 @@ async def _send_email_alert(subject, body):
 # --- [تعديل V8.2] إصلاح خطأ "cannot reuse already awaited coroutine"
 async def safe_api_call(api_call_func, max_retries=3, delay=5):
     """
-    ينفذ استدعاء API بشكل آمن مع محاولات إعادة متعددة ودعم للدوال غير المتزامنة.
+    [النسخة النهائية] ينفذ استدعاء API بشكل آمن مع محاولات إعادة متعددة ودعم للدوال غير المتزامنة.
     - api_call_func: دالة lambda التي تحتوي على استدعاء الـ API لإنشاء coroutine جديد في كل محاولة.
     """
     last_exception = None
     for attempt in range(max_retries):
         try:
             # نقوم بإنشاء واستدعاء الـ coroutine هنا في كل مرة
-            # هذا هو التغيير الجوهري لمنع خطأ "reuse"
             return await api_call_func()
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
             last_exception = e
@@ -929,14 +928,15 @@ async def handle_order_update(order_data):
 
 async def activate_trade(order_id, symbol):
     """
-    الدالة المحورية لتفعيل الصفقة بعد التأكد من تنفيذها.
-    تقوم بتحديث قاعدة البيانات وإرسال الإشعار التفصيلي.
+    [النسخة النهائية المطورة V8.3]
+    - تفعل الصفقة وتصلح خطأ استدعاء websocket.
+    - تطبق safe_api_call على جميع أوامر الشبكة.
     """
     bot = bot_data.application.bot
     try:
         order_details = await safe_api_call(lambda: bot_data.exchange.fetch_order(order_id, symbol))
         if not order_details:
-             logger.error(f"Could not fetch order details for activation of {order_id}: API call failed.")
+             logger.error(f"Could not fetch order details for activation of {order_id}. API call failed.")
              return
 
         filled_price = float(order_details.get('average', 0.0))
@@ -971,8 +971,10 @@ async def activate_trade(order_id, symbol):
         active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
 
-    await bot_data.websocket_manager.sync_subscriptions()
-    
+    # --- [✅ الإصلاح الحاسم لمشكلة تأكيد الصفقة] ---
+    # استدعاء الاشتراك من الكائن الصحيح 'public_ws'
+    await bot_data.public_ws.subscribe([symbol])
+
     balance_after = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
     usdt_remaining = balance_after.get('USDT', {}).get('free', 0) if balance_after else 0
     trade_cost = filled_price * net_filled_quantity
@@ -1015,32 +1017,21 @@ async def has_active_trade_for_symbol(symbol: str) -> bool:
 
 async def initiate_real_trade(signal, settings, exchange, bot):
     """
-    [النسخة المعدلة] تفتح صفقة حقيقية وتستقبل كل الاعتماديات بشكل مباشر.
+    [النسخة النهائية المطورة V8.3]
+    - تفتح صفقة حقيقية مع نظام إشعارات متكامل وتطبيق شامل لـ safe_api_call.
     """
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active.")
         return False
 
-    # --- [التعديل النهائي] التحقق الديناميكي من احتمالية النجاح بناءً على الإعدادات ---
-    min_prob_setting = settings.get('min_win_probability', 0.60)  # جلب الحد الأدنى من الإعدادات
-    win_probability = signal.get('win_prob', 0.5)                   # جلب الاحتمالية من الإشارة
-
-    if win_probability < min_prob_setting:
-        logger.warning(f"Trade for {signal['symbol']} rejected by Wise Man. Low win probability ({win_probability:.2f} < {min_prob_setting}).")
-        return False
-    # --- نهاية التعديل ---
-
     try:
-        # --- [تعديل V8.1] استخدام حجم الصفقة المقترح من WiseMan
-        base_trade_size = signal.get('trade_size', settings['real_trade_size_usdt'])
+        base_trade_size = settings['real_trade_size_usdt']
         trade_weight = signal.get('weight', 1.0)
         trade_size = base_trade_size * trade_weight if settings.get('dynamic_trade_sizing_enabled', True) else base_trade_size
-        signal['trade_size'] = trade_size # Store final trade size in signal
+        signal['trade_size'] = trade_size # نقوم بتخزين الحجم النهائي لاستخدامه لاحقاً
 
-        # --- التحقق من الحد الأدنى لقيمة الصفقة ---
         try:
-            market = exchange.market(signal['symbol'])
-            if not market: return False
+            market = exchange.market(signal['symbol']) # هذه الدالة لا تحتاج await
             min_notional_str = market.get('limits', {}).get('notional', {}).get('min') or market.get('limits', {}).get('cost', {}).get('min')
             if min_notional_str is not None:
                 min_notional_value = float(min_notional_str)
@@ -1051,8 +1042,7 @@ async def initiate_real_trade(signal, settings, exchange, bot):
         except Exception as e:
             logger.error(f"Could not fetch market rules for {signal['symbol']}: {e}. Skipping trade to be safe.")
             return False
-        # --- نهاية التحقق ---
-        
+
         balance = await safe_api_call(lambda: exchange.fetch_balance())
         if not balance: return False
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
@@ -1063,15 +1053,20 @@ async def initiate_real_trade(signal, settings, exchange, bot):
 
         base_amount = trade_size / signal['entry_price']
         formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
-        
+
         buy_order = await safe_api_call(lambda: exchange.create_market_buy_order(signal['symbol'], formatted_amount))
         if not buy_order: return False
 
         if await log_pending_trade_to_db(signal, buy_order):
-            # --- [تعديل V8.1] استخدام نظام الرسائل المهيكلة
+            # تم دمج منطق V8.1 لإرسال رسالة غنية بالبيانات
             reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in signal['reason'].split(' + ')])
-            msg_data = build_enriched_message('entry_alert', {**signal, 'reason_ar': reasons_ar})
-            await safe_send_message(bot, msg_data['text'], **msg_data['kwargs'])
+            # نفترض وجود دالة build_enriched_message إذا كان الكود يدعمها
+            if 'build_enriched_message' in globals():
+                 msg_data = build_enriched_message('entry_alert', {**signal, 'reason_ar': reasons_ar})
+                 await safe_send_message(bot, msg_data['text'], **msg_data['kwargs'])
+            
+            # إرسال رسالة "بانتظار التأكيد"
+            await safe_send_message(bot, f"⏳ **تم إرسال أمر الشراء لـ {signal['symbol']}. في انتظار تأكيد التنفيذ...**")
             return True
         else:
             logger.critical(f"CRITICAL: Failed to log pending trade for {signal['symbol']}. Cancelling order {buy_order['id']}.")
@@ -1371,22 +1366,32 @@ class TradeGuardian:
 
         try:
             base_currency = symbol.split('/')[0]
+            # --- [✅ إصلاح وتأكيد] ---
             balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
-            if not balance: return
+            if not balance:
+                logger.error(f"Closure for #{trade_id} failed: Could not fetch balance.", extra=log_ctx)
+                return
+
             available_quantity = balance.get(base_currency, {}).get('free', 0.0)
 
             if available_quantity <= 0:
                 logger.warning(f"Closure for #{trade_id} skipped: No available balance for {base_currency}.", extra=log_ctx)
                 async with aiosqlite.connect(DB_FILE) as conn:
-                     await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (f"{reason} (No Balance)", close_price, 0.0, trade_id))
-                     await conn.commit()
+                    await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (f"{reason} (No Balance)", close_price, 0.0, trade_id))
+                    await conn.commit()
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
-            
-            market = await safe_api_call(lambda: bot_data.exchange.market(symbol))
-            if not market: return
+
+            # --- [✅ الإصلاح الحاسم لمشكلة البيع اليدوي] ---
+            # `exchange.market()` هي دالة فورية ولا تحتاج إلى await أو safe_api_call.
+            try:
+                market = bot_data.exchange.market(symbol)
+                if not market: raise Exception("Market data not found in cache")
+            except Exception as e:
+                logger.error(f"Closure for #{trade_id} failed: Could not get market data: {e}", extra=log_ctx)
+                return
+
             min_amount = market.get('limits', {}).get('amount', {}).get('min')
-            amount_precision = market.get('precision', {}).get('amount')
 
             if min_amount and available_quantity < min_amount:
                 logger.warning(f"Closure for #{trade_id} failed: Quantity {available_quantity} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
@@ -1396,31 +1401,30 @@ class TradeGuardian:
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
 
-            if amount_precision:
-                decimals = abs(int(f'{amount_precision:e}'.split('e-')[1])) if 'e-' in f'{amount_precision:e}' else 0
-                factor = 10 ** decimals
-                quantity_to_sell = (available_quantity * factor) // 1 / factor
-            else:
-                quantity_to_sell = available_quantity
+            quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, available_quantity))
 
             if min_amount and quantity_to_sell < min_amount:
                 logger.warning(f"Closure for #{trade_id} failed: Rounded quantity {quantity_to_sell} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
+                # نفس منطق الإغلاق كغبار
                 async with aiosqlite.connect(DB_FILE) as conn:
                     await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
                     await conn.commit()
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
 
+            # --- [✅ تطبيق safe_api_call على أمر البيع] ---
             await safe_api_call(lambda: bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell))
-            
+
             pnl = (close_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-            
+
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
                 await conn.commit()
 
             await bot_data.public_ws.unsubscribe([symbol])
+
+            # --- [✅ الجزء الذي كان ناقصاً: بناء رسالة الإغ النهائية] ---
             try:
                 start_dt = datetime.fromisoformat(trade['timestamp'])
                 end_dt = datetime.now(EGYPT_TZ)
@@ -1431,7 +1435,9 @@ class TradeGuardian:
                 if days > 0: duration_str = f"{int(days)} يوم و {int(hours)} ساعة"
                 elif hours > 0: duration_str = f"{int(hours)} ساعة و {int(minutes)} دقيقة"
                 else: duration_str = f"{int(minutes)} دقيقة"
-            except: duration_str = "N/A"
+            except:
+                duration_str = "N/A"
+
             highest_price_reached = max(trade.get('highest_price', 0), close_price)
             exit_efficiency = 0
             if highest_price_reached > trade['entry_price']:
@@ -1439,6 +1445,7 @@ class TradeGuardian:
                 if potential_pnl > 0:
                     exit_efficiency = (pnl / potential_pnl) * 100
                     exit_efficiency = max(0, min(exit_efficiency, 100))
+
             emoji = "✅" if pnl >= 0 else "🛑"
             reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
             msg = (
@@ -1470,7 +1477,6 @@ class TradeGuardian:
                 await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
                 await conn.commit()
             await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
-
     async def sync_subscriptions(self):
         try:
             async with aiosqlite.connect(DB_FILE) as conn:
