@@ -8,7 +8,6 @@ from collections import defaultdict
 import asyncio
 import time
 from datetime import datetime
-from okx_maestro import safe_send_message
 # --- إعدادات أساسية ---
 logger = logging.getLogger(__name__)
 
@@ -95,35 +94,40 @@ class WiseMan:
     # --- 2. منطق "نقطة الخروج الرائعة" (جزء من المحرك السريع) ---
     # ==============================================================================
     async def _review_pending_exits(self):
-        async with aiosqlite.connect(self.db_file) as conn:
-            conn.row_factory = aiosqlite.Row
-            trades_to_review = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending_exit_confirmation'")).fetchall()
+    async with aiosqlite.connect(self.db_file) as conn:
+        conn.row_factory = aiosqlite.Row
+        trades_to_review = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending_exit_confirmation'")).fetchall()
 
-            for trade_data in trades_to_review:
-                trade = dict(trade_data)
-                symbol = trade['symbol']
-                try:
-                    ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['ema_9'] = ta.ema(df['close'], length=9)
-                    
-                    current_price = df['close'].iloc[-1]
-                    last_ema = df['ema_9'].iloc[-1]
-
-                    if current_price < last_ema:
-                        logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
-                        await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
-                    else:
-                        logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
-                        message = (f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\n"
-                        f"قرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا.")
-                        await safe_send_message(self.application.bot, message)
-                        await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
-                        await conn.commit()
+        for trade_data in trades_to_review:
+            trade = dict(trade_data)
+            symbol = trade['symbol']
+            try:
+                ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['ema_9'] = ta.ema(df['close'], length=9)
                 
-                except Exception as e:
-                    logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure as a safety measure.")
-                    await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
+                current_price = df['close'].iloc[-1]
+                last_ema = df['ema_9'].iloc[-1]
+
+                if current_price < last_ema:
+                    logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
+                    await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
+                else:
+                    logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
+                    
+                    # --- الإصلاح هنا: نقوم بالاستيراد داخل الدالة لكسر الحلقة ---
+                    from okx_maestro import safe_send_message
+                    
+                    message = (f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\n"
+                               f"قرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا.")
+                    await safe_send_message(self.application.bot, message)
+                    
+                    await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
+                    await conn.commit()
+            
+            except Exception as e:
+                logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure as a safety measure.")
+                await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
 
     # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (السيمفونية) 🎼 ---
