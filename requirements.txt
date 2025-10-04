@@ -8,3 +8,4 @@ feedparser
 nltk
 websockets
 scipy
+scikit-learn
