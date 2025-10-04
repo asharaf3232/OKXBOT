@@ -1071,7 +1071,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         settings, bot = bot_data.settings, context.bot
 
         try:
-            balance = await safe_api_call(bot_data.exchange.fetch_balance())
+            balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
             if not balance:
                 logger.error("Failed to fetch balance for scan check, skipping scan."); return
             usdt_balance = balance.get('USDT', {}).get('free', 0.0)
