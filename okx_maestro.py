@@ -326,20 +326,36 @@ async def init_database():
         raise
 
 async def log_pending_trade_to_db(signal, buy_order):
+    """
+    [النسخة المصححة V8.2] - تسجل الصفقة المعلقة في قاعدة البيانات مع جميع بيانات الذكاء الاصطناعي.
+    """
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            # --- [تعديل V8.1] إضافة البيانات الجديدة عند التسجيل في قاعدة البيانات
+            # --- [الإصلاح الحاسم] إضافة الأعمدة المفقودة win_prob و trade_size ---
             await conn.execute("""
                 INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight, win_prob, trade_size)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (datetime.now(EGYPT_TZ).isoformat(), signal['symbol'], signal['reason'], buy_order['id'], 'pending',
-                  signal['entry_price'], signal['take_profit'], signal['stop_loss'], signal.get('strength', 1), 
-                  signal.get('weight', 1.0), signal.get('win_prob', 0.5), signal.get('trade_size', bot_data.settings['real_trade_size_usdt'])))
+            """, (datetime.now(EGYPT_TZ).isoformat(), 
+                  signal['symbol'], 
+                  signal['reason'], 
+                  buy_order['id'], 
+                  'pending',
+                  signal['entry_price'], 
+                  signal['take_profit'], 
+                  signal['stop_loss'], 
+                  signal.get('strength', 1), 
+                  signal.get('weight', 1.0),
+                  signal.get('win_prob', 0.5), # <-- تم إضافة هذا الحقل
+                  signal.get('trade_size') # <-- تم إضافة هذا الحقل وتصحيح منطقه
+                 ))
             await conn.commit()
             logger.info(f"Logged pending trade for {signal['symbol']} with order ID {buy_order['id']}.")
             return True
+    except KeyError as e:
+        logger.critical(f"CRITICAL DB LOG ERROR for {signal['symbol']}: Missing key {e} in signal data. This is a critical bug.", exc_info=True)
+        return False
     except Exception as e:
-        logger.error(f"DB Log Pending Error for {signal['symbol']}: {e}")
+        logger.error(f"DB Log Pending Error for {signal['symbol']}: {e}", exc_info=True)
         return False
 
 # --- [تعديل V8.1] إضافة نظام الرسائل المهيكلة ---
@@ -386,20 +402,46 @@ def build_enriched_message(message_type, data):
     return {"text": text, "kwargs": {"reply_markup": InlineKeyboardMarkup(keyboard) if keyboard else None}}
 
 async def safe_send_message(bot, text, **kwargs):
-    for i in range(3):
+    """
+    [النسخة المطورة] - ترسل رسائل تليجرام بأمان مع معالجة الأخطاء وتقسيم الرسائل الطويلة.
+    """
+    max_length = 4096  # الحد الأقصى لطول الرسالة في تليجرام
+    for i in range(3): # عدد محاولات الإرسال
         try:
-            await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-            return
+            if len(text) > max_length:
+                logger.warning("Message is too long. Splitting into multiple parts.")
+                parts = [text[j:j+max_length] for j in range(0, len(text), max_length)]
+                for part in parts:
+                    await bot.send_message(TELEGRAM_CHAT_ID, part, parse_mode=ParseMode.MARKDOWN, **kwargs)
+                    await asyncio.sleep(0.5) # فاصل زمني بسيط بين الأجزاء
+                return True # تم الإرسال بنجاح
+            else:
+                await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+                return True # تم الإرسال بنجاح
+
+        except BadRequest as e:
+            if "message is too long" in str(e).lower():
+                # هذا الشرط للتعامل مع الحالة إذا فشل التقسيم الأولي لسبب ما
+                logger.error(f"Telegram BadRequest (Message too long): {e}. Retrying with split.")
+                text = text # النص الأصلي لا يزال موجودًا، سيعاد تقسيمه في المحاولة التالية
+                continue # انتقل إلى المحاولة التالية
+            else:
+                logger.critical(f"Critical Telegram BadRequest: {e}. Stopping retries.")
+                return False # خطأ فادح، لا تعد المحاولة
+
         except (TimedOut, Forbidden) as e:
             logger.error(f"Telegram Send Error: {e}. Attempt {i+1}/3.")
-            if isinstance(e, Forbidden) or i == 2:
-                logger.critical("Critical Telegram error. Cannot send messages.")
-                return
-            await asyncio.sleep(2)
-        except Exception as e:
-            logger.error(f"Unknown Telegram Send Error: {e}. Attempt {i+1}/3.")
-            await asyncio.sleep(2)
+            if isinstance(e, Forbidden): # إذا تم حظر البوت
+                logger.critical("Critical Telegram error: BOT IS BLOCKED. Cannot send messages.")
+                return False # لا فائدة من إعادة المحاولة
+            await asyncio.sleep(2 * (i + 1)) # زيادة مدة الانتظار مع كل محاولة
 
+        except Exception as e:
+            logger.error(f"Unknown Telegram Send Error: {e}. Attempt {i+1}/3.", exc_info=True)
+            await asyncio.sleep(2 * (i + 1))
+
+    logger.error("Failed to send message after multiple retries.")
+    return False
 async def safe_edit_message(query, text, **kwargs):
     try: await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except BadRequest as e:
