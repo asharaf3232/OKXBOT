@@ -984,7 +984,7 @@ async def initiate_real_trade(signal, settings, exchange, bot):
 
         # --- التحقق من الحد الأدنى لقيمة الصفقة ---
         try:
-            market = await safe_api_call(exchange.market(signal['symbol']))
+            market = exchange.market(signal['symbol'])
             if not market: return False
             min_notional_str = market.get('limits', {}).get('notional', {}).get('min') or market.get('limits', {}).get('cost', {}).get('min')
             if min_notional_str is not None:
