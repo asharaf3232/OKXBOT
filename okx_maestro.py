@@ -181,7 +181,8 @@ DEFAULT_SETTINGS = {
     "wise_man_strong_adx_level": 30,  
     "wise_guardian_enabled": True,
     "wise_guardian_trigger_pct": -1.5,
-    "wise_guardian_cooldown_minutes": 15,
+    "min_win_probability": 0.60,
+    
 }
 
 STRATEGY_NAMES_AR = {
@@ -193,22 +194,37 @@ STRATEGY_NAMES_AR = {
 PRESET_NAMES_AR = {"professional": "احترافي", "strict": "متشدد", "lenient": "متساهل", "very_lenient": "فائق التساهل", "bold_heart": "القلب الجريء"}
 
 SETTINGS_PRESETS = {
-    "professional": copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}),
-    "strict": {**copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
-    "lenient": {**copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
+    "professional": {
+        **copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}),
+        "min_win_probability": 0.60,
+    },
+    "strict": {
+        **copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), 
+        "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, 
+        "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0},
+        "min_win_probability": 0.65,
+    },
+    "lenient": {
+        **copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}), 
+        "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, 
+        "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2},
+        "min_win_probability": 0.55,
+    },
     "very_lenient": {
         **copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}),
         "max_concurrent_trades": 12, "adx_filter_enabled": False, "market_mood_filter_enabled": False,
         "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": False},
         "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
-        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4}, "spread_filter": {"max_spread_percent": 1.5}
+        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4}, "spread_filter": {"max_spread_percent": 1.5},
+        "min_win_probability": 0.50,
     },
     "bold_heart": {
         **copy.deepcopy({k: v for k, v in DEFAULT_SETTINGS.items() if "adaptive" not in k and "dynamic" not in k and "strategy" not in k}),
         "max_concurrent_trades": 15, "risk_reward_ratio": 1.5, "multi_timeframe_enabled": False, "market_mood_filter_enabled": False,
         "adx_filter_enabled": False, "btc_trend_filter_enabled": False, "news_filter_enabled": False,
         "volume_filter_multiplier": 1.0, "liquidity_filters": {"min_quote_volume_24h_usd": 100000, "min_rvol": 1.0},
-        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.2}, "spread_filter": {"max_spread_percent": 2.0}
+        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.2}, "spread_filter": {"max_spread_percent": 2.0},
+        "min_win_probability": 0.45,
     }
 }
 # --- الحالة العامة للبوت ---
@@ -950,11 +966,14 @@ async def initiate_real_trade(signal, settings, exchange, bot):
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active.")
         return False
 
-    # --- [تعديل V8.1] التحقق من احتمالية النجاح قبل فتح الصفقة
-    win_probability = signal.get('win_prob', 1.0)
-    if win_probability < 0.6:
-        logger.warning(f"Trade for {signal['symbol']} rejected by Wise Man. Low win probability ({win_probability:.2f} < 0.6).")
+    # --- [التعديل النهائي] التحقق الديناميكي من احتمالية النجاح بناءً على الإعدادات ---
+    min_prob_setting = settings.get('min_win_probability', 0.60)  # جلب الحد الأدنى من الإعدادات
+    win_probability = signal.get('win_prob', 0.5)                   # جلب الاحتمالية من الإشارة
+
+    if win_probability < min_prob_setting:
+        logger.warning(f"Trade for {signal['symbol']} rejected by Wise Man. Low win probability ({win_probability:.2f} < {min_prob_setting}).")
         return False
+    # --- نهاية التعديل ---
 
     try:
         # --- [تعديل V8.1] استخدام حجم الصفقة المقترح من WiseMan
@@ -1010,7 +1029,7 @@ async def initiate_real_trade(signal, settings, exchange, bot):
     except Exception as e:
         logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True)
         return False
-
+    
 async def log_candidate_to_db(signal):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -1907,6 +1926,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(f"حجم الصفقة ($): {s['real_trade_size_usdt']}", callback_data="param_set_real_trade_size_usdt"),
          InlineKeyboardButton(f"مضاعف وقف الخسارة (ATR): {s['atr_sl_multiplier']}", callback_data="param_set_atr_sl_multiplier")],
         [InlineKeyboardButton(f"نسبة المخاطرة/العائد: {s['risk_reward_ratio']}", callback_data="param_set_risk_reward_ratio")],
+        [InlineKeyboardButton(f"أقل احتمالية نجاح: {s.get('min_win_probability', 0.6)*100:.0f}%", callback_data="param_set_min_win_probability")],
         [InlineKeyboardButton(bool_format('trailing_sl_enabled', 'تفعيل الوقف المتحرك'), callback_data="param_toggle_trailing_sl_enabled")],
         [InlineKeyboardButton(f"تفعيل الوقف المتحرك (%): {s['trailing_sl_activation_percent']}", callback_data="param_set_trailing_sl_activation_percent"),
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
