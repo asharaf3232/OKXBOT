@@ -8,7 +8,7 @@ from collections import defaultdict
 import asyncio
 import time
 from datetime import datetime
-
+from okx_maestro import safe_send_message
 # --- إعدادات أساسية ---
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,9 @@ class WiseMan:
                         await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
                     else:
                         logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
+                        message = (f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\n"
+                        f"قرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا.")
+                        await safe_send_message(self.application.bot, message)
                         await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
                         await conn.commit()
                 
