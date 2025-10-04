@@ -1329,7 +1329,7 @@ class TradeGuardian:
 
         try:
             base_currency = symbol.split('/')[0]
-            balance = await safe_api_call(bot_data.exchange.fetch_balance())
+            balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
             if not balance: return
             available_quantity = balance.get(base_currency, {}).get('free', 0.0)
 
