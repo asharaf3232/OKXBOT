@@ -1011,7 +1011,7 @@ async def initiate_real_trade(signal, settings, exchange, bot):
             return False
         # --- نهاية التحقق ---
         
-        balance = await safe_api_call(exchange.fetch_balance())
+        balance = await safe_api_call(lambda: exchange.fetch_balance())
         if not balance: return False
         usdt_balance = balance.get('USDT', {}).get('free', 0.0)
 
