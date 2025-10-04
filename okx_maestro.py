@@ -1225,14 +1225,22 @@ class TradeGuardian:
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
                     # 3. Incremental Profit Notifications & Wise Man call for TP extension
-                    if settings.get('incremental_notifications_enabled', True):
-                        last_notified = trade.get('last_profit_notification_price', trade['entry_price'])
-                        increment = settings.get('incremental_notification_percent', 2.0) / 100
-                        if current_price >= last_notified * (1 + increment):
-                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100
-                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
-                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
-                            
+                    # --- الكود المعدل ---
+if settings.get('incremental_notifications_enabled', True):
+    last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
+    increment_percent = settings.get('incremental_notification_percent', 2.0)
+    
+    # حساب عتبة الربح التالية التي يجب تجاوزها
+    next_notification_target = last_notified_price * (1 + increment_percent / 100)
+
+    if current_price >= next_notification_target:
+        profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+        
+        await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+        
+        # تحديث قاعدة البيانات بقيمة العتبة التي تم تجاوزها، وليس السعر الحالي
+        # هذا يضمن عدم إرسال الرسالة مرة أخرى إلا عند تجاوز العتبة التالية
+        await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (next_notification_target, trade['id']))
                             if 'wise_man' in globals() and wise_man:
                                 asyncio.create_task(wise_man.check_for_strong_momentum(trade))
 
