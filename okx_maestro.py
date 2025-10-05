@@ -2256,17 +2256,36 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
 
 async def post_init(application: Application):
-    logger.info("Performing post-initialization setup for OKX Bot V8.1...")
+    """
+    [النسخة النهائية والمحصنة V9.1]
+    - تقوم بفحص متغيرات البيئة بشكل صريح.
+    - تستخدم safe_api_call للاتصال الأولي لضمان الموثوقية.
+    - تفشل بشكل صريح وواضح إذا لم يتم الاتصال بنجاح.
+    """
+    logger.info("Performing post-initialization setup for OKX Bot...")
+
+    # ==================== فحص متغيرات البيئة (للتأكيد النهائي) ====================
+    logger.info("--- STARTING DEBUG: CHECKING ENVIRONMENT VARIABLES ---")
+    key = os.getenv('OKX_API_KEY')
+    secret = os.getenv('OKX_API_SECRET')
+    password = os.getenv('OKX_API_PASSWORD')
+    logger.info(f"DEBUG: OKX_API_KEY Found: {'Yes' if key else 'No'}")
+    logger.info(f"DEBUG: OKX_API_SECRET Found: {'Yes' if secret else 'No'}")
+    logger.info(f"DEBUG: OKX_API_PASSWORD Found: {'Yes' if password else 'No'}")
+    if key: logger.info(f"DEBUG: API Key starts with: {key[:5]}...")
+    logger.info("--- ENDING DEBUG ---")
+    # =========================================================================
 
     required_vars = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'OKX_API_KEY', 'OKX_API_SECRET', 'OKX_API_PASSWORD']
-    missing_vars = [var for var in required_vars if not get_encrypted_env(var)]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
     if missing_vars:
         logger.critical(f"FATAL: Missing required environment variables: {', '.join(missing_vars)}")
         raise RuntimeError("Bot cannot start due to missing environment variables.")
 
     application.bot_data['TELEGRAM_CHAT_ID'] = TELEGRAM_CHAT_ID
 
-    try: await init_database()
+    try:
+        await init_database()
     except Exception as e:
         logger.critical(f"FATAL: Database could not be initialized: {e}", exc_info=True)
         raise RuntimeError("Bot cannot start due to database failure.")
@@ -2274,22 +2293,42 @@ async def post_init(application: Application):
     try:
         logger.info("Attempting to connect to OKX...")
         bot_data.exchange = ccxt.okx({
-            'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSWORD,
-            'enableRateLimit': True, 'options': {'defaultType': 'spot', 'timeout': 30000}
+            'apiKey': os.getenv('OKX_API_KEY'),
+            'secret': os.getenv('OKX_API_SECRET'),
+            'password': os.getenv('OKX_API_PASSWORD'),
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot', 'timeout': 30000}
         })
-        await bot_data.exchange.load_markets()
-        await bot_data.exchange.fetch_balance()
-        logger.info("✅ Successfully connected to OKX Spot.")
+        
+        logger.info("DEBUG: CCXT instance created. Attempting to load markets...")
+        # --- [✅ الإصلاح الحاسم] ---
+        await safe_api_call(lambda: bot_data.exchange.load_markets())
+        
+        logger.info("DEBUG: Markets loaded. Attempting to fetch initial balance...")
+        initial_balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
+        
+        if not initial_balance or 'total' not in initial_balance:
+            logger.critical("🔥 FATAL: Fetched initial balance, but it seems empty or invalid. Check API key permissions (Read Access).")
+            raise RuntimeError("Initial balance fetch failed or returned invalid data.")
+
+        logger.info(f"✅ Successfully connected to OKX Spot. Initial USDT Free Balance: {initial_balance.get('USDT', {}).get('free', 0)}")
+    
     except Exception as e:
-        logger.critical(f"🔥 FATAL: Could not connect to OKX. PLEASE CHECK YOUR API KEYS AND PASSPHRASE.", exc_info=True)
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "🚨 **فشل تشغيل البوت** 🚨\n\nلم يتمكن البوت من الاتصال بمنصة OKX. يرجى التحقق من مفاتيح الـ API وكلمة المرور الخاصة بها.")
+        error_message = f"🚨 **فشل تشغيل البوت** 🚨\n\nلم يتمكن البوت من الاتصال بمنصة OKX أثناء بدء التشغيل.\nالخطأ: `{str(e)}`\n\n**تأكد من:**\n1. صحة مفاتيح الـ API.\n2. صلاحيات القراءة (Read) على الأقل للمفاتيح."
+        logger.critical(f"🔥 FATAL: Could not connect to OKX during post_init.", exc_info=True)
+        # التأكد من وجود البوت قبل الإرسال
+        if hasattr(application, 'bot'):
+            await application.bot.send_message(TELEGRAM_CHAT_ID, error_message, parse_mode=ParseMode.MARKDOWN)
         raise RuntimeError("Failed to connect to OKX exchange.")
 
+    # (بقية الدالة تبقى كما هي)
     bot_data.application = application
-
     if NLTK_AVAILABLE:
-        try: nltk.data.find('sentiment/vader_lexicon.zip')
-        except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
+        try:
+            nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError:
+            logger.info("Downloading NLTK data...");
+            nltk.download('vader_lexicon', quiet=True)
     
     load_settings()
 
@@ -2306,6 +2345,7 @@ async def post_init(application: Application):
     
     logger.info("WebSocket engines started. Waiting 5s for connections to establish...")
     await asyncio.sleep(5)
+    
     await bot_data.trade_guardian.sync_subscriptions()
     logger.info("WebSocket Manager: Initial subscription sync complete.")
 
@@ -2318,12 +2358,10 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
     jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
     jq.run_repeating(wise_man.review_active_trades_with_tactics, interval=900, first=120, name="wise_man_tactical_review")
-    # --- [تعديل V8.1] جدولة مهمة تدريب النموذج
-    jq.run_repeating(wise_man.train_ml_model, interval=604800, first=3600, name="wise_man_ml_train") # Run once an hour after start, then weekly
+    jq.run_repeating(wise_man.train_ml_model, interval=604800, first=3600, name="wise_man_ml_train")
 
     logger.info(f"All jobs scheduled. OKX Bot is fully operational.")
-    await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX V8.1 (مستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
-
+    await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX (مصحح V9.1) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
 async def post_shutdown(application: Application):
     logger.info("Bot shutdown initiated...")
     if bot_data.websocket_manager:
