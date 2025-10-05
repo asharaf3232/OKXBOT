@@ -9,3 +9,4 @@ nltk
 websockets
 scipy
 scikit-learn
+aioredis
