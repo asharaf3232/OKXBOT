@@ -283,7 +283,7 @@ class WiseMan:
                     logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
                     await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
 
-    #     # ==============================================================================
+        # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
     # ==============================================================================
     async def review_active_trades_with_tactics(self, context: object = None):
@@ -374,7 +374,8 @@ class WiseMan:
                     await asyncio.sleep(2)
                 except Exception as e:
                     logger.error(f"Wise Man: Error during tactical review for {symbol}: {e}", exc_info=True)
- ==============================================================================
+
+    # ==============================================================================
     # --- ♟️ المدير الاستراتيجي (يعمل كل ساعة) ♟️ ---
     # ==============================================================================
     async def review_portfolio_risk(self, context: object = None):
