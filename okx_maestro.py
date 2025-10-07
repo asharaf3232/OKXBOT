@@ -1324,98 +1324,104 @@ class TradeGuardian:
             # في حالة الخطأ، أرجع آخر قيمة معروفة إن وجدت
             return self.atr_cache.get(symbol, {}).get('value')
 
+
     async def handle_ticker_update(self, ticker_data):
         async with trade_management_lock:
             symbol = ticker_data['instId'].replace('-', '/')
             current_price = float(ticker_data['last'])
             
+            if symbol not in bot_data.active_trades_cache:
+                return
+            
+            trade = bot_data.active_trades_cache[symbol].copy()
+            
+            # تجاهل أي تحديثات للصفقات التي ليست في حالة نشطة أو تمديد
+            if trade['status'] not in ['active', 'extending']:
+                return
+
             try:
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    conn.row_factory = aiosqlite.Row
-                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
+                settings = bot_data.settings
+                
+                # --- [✅ الجوهرة: دمج منطق الرجل الحكيم للاستجابة الفورية] ---
+                profit_range = trade['take_profit'] - trade['entry_price']
+                if profit_range > 0:
+                    proximity_percent = settings.get('wise_man_proximity_percent', 0.95)
+                    trigger_price = trade['entry_price'] + (profit_range * proximity_percent)
+                    price_is_near_target = current_price >= trigger_price
+                else:
+                    price_is_near_target = False
+
+                if price_is_near_target and trade['status'] == 'active':
+                    bot_data.active_trades_cache[symbol]['status'] = 'extending' # تجميد فوري لمنع التعارض
                     
-                    if not trade:
-                        return
+                    ohlcv = await safe_api_call(lambda: bot_data.exchange.fetch_ohlcv(symbol, '15m', limit=50))
+                    if ohlcv:
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        df.ta.rsi(length=14, append=True)
+                        adx_data = ta.adx(df['high'], df['low'], df['close'])
+                        current_rsi = df['RSI_14'].iloc[-1]
+                        current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 0
+                        strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
 
-                    trade = dict(trade)
-                    settings = bot_data.settings
+                        anomaly_multiplier = settings.get('anomaly_candle_multiplier', 5.0)
+                        avg_candle_size = (df['high'] - df['low']).iloc[:-1].mean()
+                        last_candle_size = df['high'].iloc[-1] - df['low'].iloc[-1]
+                        is_anomaly_spike = last_candle_size > (avg_candle_size * anomaly_multiplier)
 
-                    # --- [✅ تعديل جديد] --- تحديث أعلى سعر وصلت إليه الصفقة
-                    highest_price_so_far = max(trade.get('highest_price', 0), current_price)
-                    if highest_price_so_far > trade.get('highest_price', 0):
-                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price_so_far, trade['id']))
+                        if current_adx > strong_adx_level and current_rsi < 80 and not is_anomaly_spike:
+                            async with aiosqlite.connect(DB_FILE) as conn:
+                                previous_tp = trade['take_profit']
+                                new_tp = previous_tp * 1.05
+                                new_sl = trigger_price
 
-                    # التحقق من الأهداف الأساسية أولاً
+                                bot_data.active_trades_cache[symbol].update({'take_profit': new_tp, 'stop_loss': new_sl, 'status': 'active'})
+                                await conn.execute("UPDATE trades SET take_profit = ?, stop_loss = ?, status = 'active' WHERE id = ?", (new_tp, new_sl, trade['id']))
+                                await conn.commit()
+                                
+                                logger.info(f"TURBO-MODE: Trade #{trade['id']} TP extended to {new_tp:.4f}")
+                                from okx_maestro import safe_send_message
+                                await safe_send_message(self.application.bot, f"🚀 **محرك التيربو | #{trade['id']} {symbol}**\nتم رصد زخم فوري وتمديد الهدف!")
+                                trade = bot_data.active_trades_cache[symbol].copy() # تحديث بيانات الصفقة لمواصلة العمل
+                        else:
+                            logger.info(f"TURBO-MODE: TP Extension for #{trade['id']} denied. ADX:{current_adx:.1f}, RSI:{current_rsi:.1f}, Anomaly:{is_anomaly_spike}")
+                            bot_data.active_trades_cache[symbol]['status'] = 'active' # إعادة تفعيل الصفقة إذا لم يتم التمديد
+
+                # --- [نهاية دمج المنطق] ---
+
+                async with aiosqlite.connect(DB_FILE) as conn:
                     if current_price >= trade['take_profit']:
                         await self._close_trade(trade, "ناجحة (TP)", current_price)
                         return
                     
                     if current_price <= trade['stop_loss']:
-                        if trade['stop_loss'] > trade['entry_price']:
-                            logger.warning(f"PROFIT STOP HIT for trade #{trade['id']}. Handing off to Wise Man for momentum confirmation.")
-                            await conn.execute("UPDATE trades SET status = 'pending_profit_stop_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
-                            await conn.commit()
-                        else:
-                            logger.warning(f"INITIAL Stop Loss hit for trade #{trade['id']} on {symbol}. Handing off to Wise Man.")
-                            await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
-                            await conn.commit()
+                        new_status = 'pending_profit_stop_confirmation' if trade['stop_loss'] > trade['entry_price'] else 'pending_exit_confirmation'
+                        bot_data.active_trades_cache[symbol]['status'] = new_status
+                        await conn.execute("UPDATE trades SET status = ? WHERE id = ? AND status = 'active'", (new_status, trade['id']))
+                        await conn.commit()
+                        logger.warning(f"Stop Loss hit for trade #{trade['id']}. Handing off to Wise Man for confirmation.")
                         return
 
-                    # --- [✅ تعديل جديد] ---
-                    # نعيد تحميل بيانات الصفقة لضمان أن المتغير المحلي trade محدّث بآخر قيمة (خصوصاً highest_price)
-                    trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
-                    trade = dict(trade)
+                    highest_price_so_far = max(trade.get('highest_price', 0), current_price)
+                    if highest_price_so_far > trade.get('highest_price', 0):
+                        bot_data.active_trades_cache[symbol]['highest_price'] = highest_price_so_far
+                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price_so_far, trade['id']))
+                        trade['highest_price'] = highest_price_so_far # تحديث النسخة المحلية
 
-                    # الآن نكمل باقي المنطق مع بيانات دقيقة ومحفوظة
-                    if settings.get('trailing_sl_enabled', True):
-                        if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
-                            new_sl = trade['entry_price'] * 1.001
-                            if new_sl > trade['stop_loss']:
-                                await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                                await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
-                        
-                        trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
-                        if trade_after_activation and trade_after_activation['trailing_sl_active']:
+                        current_atr = await self._get_atr(symbol)
+                        if current_atr:
+                            atr_multiplier = settings.get('atr_trailing_multiplier', 2.5)
+                            new_sl_candidate = highest_price_so_far - (current_atr * atr_multiplier)
                             
-                            # --- [✅ الكود الجديد والكامل للوقف المتحرك الديناميكي] ---
-                            current_atr = await self._get_atr(symbol)
-                            if current_atr:
-                                atr_multiplier = settings.get('atr_trailing_multiplier', 2.5) 
-                                new_sl_candidate = trade_after_activation['highest_price'] - (current_atr * atr_multiplier)
-                                
-                                if new_sl_candidate > trade_after_activation['stop_loss']:
-                                    await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
-                                    logger.info(f"ATR Trailing SL for #{trade['id']} updated to {new_sl_candidate:.4f}")
-                            # --- [نهاية الكود الجديد] ---
+                            if new_sl_candidate > trade['stop_loss']:
+                                bot_data.active_trades_cache[symbol]['stop_loss'] = new_sl_candidate
+                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
-                    if settings.get('incremental_notifications_enabled', True):
-                        last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
-                        increment_percent = settings.get('incremental_notification_percent', 2.0)
-                        next_notification_target = last_notified_price * (1 + increment_percent / 100)
-                        
-                        if current_price >= next_notification_target:
-                            final_notified_price = last_notified_price
-                            while current_price >= next_notification_target:
-                                final_notified_price = next_notification_target
-                                next_notification_target = final_notified_price * (1 + increment_percent / 100)
-                            
-                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100 if trade['entry_price'] > 0 else 0
-                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
-                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
-
-                    if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
-                        drawdown_pct = ((current_price / trade.get('highest_price')) - 1) * 100
-                        trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
-                        if drawdown_pct < trigger_pct:
-                            cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
-                            last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
-                            if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
-                                bot_data.last_deep_analysis_time[trade['id']] = time.time()
-                    
                     await conn.commit()
 
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+                if symbol in bot_data.active_trades_cache: # إجراء وقائي
+                    bot_data.active_trades_cache[symbol]['status'] = 'active' # إعادة تفعيل الصفقة عند حدوث خطأ
 
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
