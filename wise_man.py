@@ -347,19 +347,39 @@ class WiseMan:
                         price_is_near_target = False
 
                     if price_is_near_target:
+                        # --- [✅ تعديل جديد] --- إضافة حساب RSI
+                        df.ta.rsi(length=14, append=True)
+                        current_rsi = df['RSI_14'].iloc[-1]
+                        # --- [نهاية التعديل] ---
+
                         adx_data = ta.adx(df['high'], df['low'], df['close'])
                         current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 0
 
-                        if current_adx > strong_adx_level:
+                        # --- [✅ تعديل جديد] --- إضافة شرط RSI إلى القرار
+                        if current_adx > strong_adx_level and current_rsi < 80:
                             previous_tp = trade['take_profit']
                             new_tp = previous_tp * 1.05
-                            new_sl = trigger_price
+                            new_sl = trigger_price # هذا هو الإصلاح الذي نفذته بالفعل
                             await conn.execute(
                                 "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
                                 (new_tp, new_sl, trade['id'],)
                             )
                             await conn.commit()
-                            logger.info(f"Wise Man extended TP to {new_tp} and TRAILED SL to {new_sl} for trade #{trade['id']}")
+                            logger.info(f"Wise Man extended TP to {new_tp} and TRAILED SL to {new_sl} for trade #{trade['id']} due to strong momentum (ADX: {current_adx:.2f}, RSI: {current_rsi:.2f}).")
+                            from okx_maestro import safe_send_message
+                            locked_in_profit_pct = (new_sl / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+                            await safe_send_message(
+                                self.application.bot,
+                                f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
+                                f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
+                                f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
+                                f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
+                            )
+                        # --- [✅ تعديل جديد] --- إضافة تسجيل حالة عدم التمديد
+                        elif current_adx > strong_adx_level and current_rsi >= 80:
+                            logger.info(f"Wise Man decided NOT to extend TP for #{trade['id']}. ADX is strong ({current_adx:.2f}) but RSI is overbought ({current_rsi:.2f}).")
+                        # --- [نهاية التعديل] ---
+
                             from okx_maestro import safe_send_message
                             locked_in_profit_pct = (new_sl / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
                             await safe_send_message(
