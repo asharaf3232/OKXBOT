@@ -1300,6 +1300,7 @@ class TradeGuardian:
                     trade = dict(trade)
                     settings = bot_data.settings
 
+                    # التحقق من الأهداف الأساسية أولاً
                     if current_price >= trade['take_profit']:
                         await self._close_trade(trade, "ناجحة (TP)", current_price)
                         return
@@ -1310,21 +1311,32 @@ class TradeGuardian:
                         await conn.commit()
                         return
 
+                    # --- [✅ الإصلاح الحاسم لمشكلة تتبع أعلى سعر] ---
                     highest_price = max(trade.get('highest_price', 0), current_price)
                     if highest_price > trade.get('highest_price', 0):
+                        # 1. نقوم بتحديث وحفظ أعلى سعر فورًا وبشكل مستقل لضمان عدم ضياعه
                         await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+                        await conn.commit()
+                        
+                        # 2. نعيد تحميل بيانات الصفقة لضمان أن المتغير المحلي trade محدّث بآخر قيمة
+                        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                        trade = dict(trade)
+                    # --- [نهاية الإصلاح] ---
 
+                    # الآن نكمل باقي المنطق مع بيانات دقيقة ومحفوظة
                     if settings.get('trailing_sl_enabled', True):
                         if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
                             new_sl = trade['entry_price'] * 1.001
                             if new_sl > trade['stop_loss']:
                                 await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                                await conn.commit()
+                                # لا حاجة لـ conn.commit() هنا، سيتم في نهاية الدالة
                                 await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
                         
+                        # نعيد قراءة الصفقة للتأكد من حالة trailing_sl_active المحدثة
                         trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
                         if trade_after_activation and trade_after_activation['trailing_sl_active']:
-                            new_sl_candidate = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                            # نستخدم أعلى سعر من الصفقة المحدثة لضمان الدقة
+                            new_sl_candidate = trade_after_activation['highest_price'] * (1 - settings['trailing_sl_callback_percent'] / 100)
                             if new_sl_candidate > trade_after_activation['stop_loss']:
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
 
@@ -1339,12 +1351,12 @@ class TradeGuardian:
                                 final_notified_price = next_notification_target
                                 next_notification_target = final_notified_price * (1 + increment_percent / 100)
                             
-                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100 if trade['entry_price'] > 0 else 0
                             await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
                             await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
 
                     if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
-                        drawdown_pct = ((current_price / highest_price) - 1) * 100
+                        drawdown_pct = ((current_price / trade.get('highest_price')) - 1) * 100
                         trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
                         if drawdown_pct < trigger_pct:
                             cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
@@ -1356,7 +1368,6 @@ class TradeGuardian:
 
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
-
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
