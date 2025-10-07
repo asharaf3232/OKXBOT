@@ -240,17 +240,20 @@ class WiseMan:
                     logger.error(f"Wise Man: Error reviewing entry candidate for {symbol}: {e}", exc_info=True)
                     await conn.execute("UPDATE trade_candidates SET status = 'error' WHERE id = ?", (candidate['id'],)); await conn.commit()
 
-    # ==============================================================================
+    #     # ==============================================================================
     # --- 2. منطق "نقطة الخروج الرائعة" (جزء من المحرك السريع) ---
     # ==============================================================================
     async def _review_pending_exits(self):
-        """يراجع طلبات الخروج مع الأخذ في الاعتبار مشاعر السوق."""
+        """
+        [النسخة النهائية والمصححة] يراجع طلبات الخروج.
+        - يغلق "وقف الربح" فورًا وبشكل حاسم.
+        - يمنح "وقف الخسارة الأولي" فرصة ثانية بناءً على الزخم اللحظي.
+        """
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             trades_to_review = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending_exit_confirmation'")).fetchall()
             if not trades_to_review: return
 
-            # --- [تعديل V2.0] جلب مشاعر السوق مرة واحدة لجميع المراجعات
             from okx_maestro import get_fundamental_market_mood
             mood_result = await get_fundamental_market_mood()
             is_negative_mood = mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]
@@ -259,6 +262,22 @@ class WiseMan:
                 trade = dict(trade_data)
                 symbol = trade['symbol']
                 try:
+                    # --- [✅ الإصلاح النهائي للمنطق] ---
+                    # الخطوة 1: نميّز بين وقف الربح ووقف الخسارة
+                    is_profit_stop = trade['stop_loss'] > trade['entry_price']
+
+                    if is_profit_stop:
+                        # الحالة الأولى: هذا وقف ربح. يجب التنفيذ فورًا وبدون تردد.
+                        logger.warning(f"Wise Man confirms PROFIT STOP exit for {symbol}. This is a mandatory, no-second-chance exit.")
+                        # نحتاج السعر الحالي للإغلاق
+                        async with self.request_semaphore:
+                           ticker = await self.exchange.fetch_ticker(symbol)
+                        current_price = ticker['last']
+                        await self.bot_data.trade_guardian._close_trade(trade, "ناجحة (وقف ربح مؤمّن)", current_price)
+                        continue  # ننتقل لمراجعة الصفقة التالية فورًا
+
+                    # --- [المنطق القديم يبقى كما هو، ولكن فقط لحالة وقف الخسارة الأولي] ---
+                    # الحالة الثانية: هذا وقف خسارة أولي. نمنحه فرصة أخيرة.
                     async with self.request_semaphore:
                         ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -266,18 +285,16 @@ class WiseMan:
                     current_price = df['close'].iloc[-1]
                     last_ema = df['ema_9'].iloc[-1]
                     
-                    # --- [تعديل V2.0] تشديد شرط الخروج إذا كانت المشاعر سلبية
-                    # نجعل الخروج أكثر حساسية (يحدث أسرع) عندما يكون المزاج سيئًا
                     exit_threshold = last_ema
                     if is_negative_mood:
-                        exit_threshold *= 0.998 # A tighter stop: exit even if price is only slightly below EMA
-                        logger.info(f"Wise Man: Negative market mood detected. Tightening SL for {symbol}.")
+                        exit_threshold *= 0.998
+                        logger.info(f"Wise Man: Negative market mood detected. Tightening SL confirmation for {symbol}.")
                     
                     if current_price < exit_threshold:
-                        logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
+                        logger.warning(f"Wise Man confirms INITIAL SL exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
                         await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
                     else:
-                        logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
+                        logger.info(f"Wise Man cancels INITIAL SL exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
                         from okx_maestro import safe_send_message
                         message = f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\nقرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا."
                         await safe_send_message(self.application.bot, message)
@@ -285,7 +302,9 @@ class WiseMan:
                         await conn.commit()
                 except Exception as e:
                     logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
+                    # في حالة حدوث أي خطأ، يتم الإغلاق إجباريًا لضمان عدم ترك الصفقة مفتوحة
                     await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
+
 
     # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
