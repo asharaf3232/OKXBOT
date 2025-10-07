@@ -353,7 +353,7 @@ class WiseMan:
                         if current_adx > strong_adx_level:
                             previous_tp = trade['take_profit']
                             new_tp = previous_tp * 1.05
-                            new_sl = previous_tp * 0.99
+                            new_sl = trigger_price
                             await conn.execute(
                                 "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
                                 (new_tp, new_sl, trade['id'],)
