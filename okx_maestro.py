@@ -149,6 +149,7 @@ DEFAULT_SETTINGS = {
     "trailing_sl_enabled": True,
     "trailing_sl_activation_percent": 2.0,
     "trailing_sl_callback_percent": 1.5,
+    "atr_trailing_multiplier": 2.5,
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "whale_radar", "rsi_divergence", "supertrend_pullback"],
     "market_mood_filter_enabled": True,
     "fear_and_greed_threshold": 30,
@@ -1280,9 +1281,48 @@ class PublicWebSocketManager:
     async def run(self):
         await exponential_backoff_with_jitter(self._run_loop)
 
+# okx_maestro.py -> استبدل الكلاس الحالي بهذا الكود بالكامل
+
 class TradeGuardian:
     def __init__(self, application):
         self.application = application
+        # --- [✅ تعديل جديد] ---
+        # ذاكرة تخزين مؤقت لقيم ATR لتجنب استدعاءات API المفرطة
+        # {'symbol': {'value': 0.123, 'timestamp': 167...}}
+        self.atr_cache = {}
+
+    async def _get_atr(self, symbol: str) -> float | None:
+        """
+        [✅ دالة جديدة]
+        تجلب قيمة ATR للعملة مع استخدام ذاكرة تخزين مؤقتة.
+        """
+        now = time.time()
+        cache_duration = 180 # تحديث قيمة ATR كل 3 دقائق
+
+        if symbol in self.atr_cache and (now - self.atr_cache[symbol]['timestamp'] < cache_duration):
+            return self.atr_cache[symbol]['value']
+
+        try:
+            # استخدم safe_api_call لضمان الموثوقية
+            ohlcv = await safe_api_call(lambda: bot_data.exchange.fetch_ohlcv(symbol, '5m', limit=15))
+            if not ohlcv or len(ohlcv) < 14:
+                return self.atr_cache.get(symbol, {}).get('value') # إرجاع القيمة القديمة إذا فشل الجلب
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
+            
+            if atr_series is not None and not atr_series.empty:
+                current_atr = atr_series.iloc[-1]
+                if pd.notna(current_atr):
+                    self.atr_cache[symbol] = {'value': current_atr, 'timestamp': now}
+                    return current_atr
+            
+            return self.atr_cache.get(symbol, {}).get('value') # إرجاع القيمة القديمة عند الفشل
+
+        except Exception as e:
+            logger.warning(f"Guardian ATR calculation failed for {symbol}: {e}")
+            # في حالة الخطأ، أرجع آخر قيمة معروفة إن وجدت
+            return self.atr_cache.get(symbol, {}).get('value')
 
     async def handle_ticker_update(self, ticker_data):
         async with trade_management_lock:
@@ -1300,30 +1340,31 @@ class TradeGuardian:
                     trade = dict(trade)
                     settings = bot_data.settings
 
+                    # --- [✅ تعديل جديد] --- تحديث أعلى سعر وصلت إليه الصفقة
+                    highest_price_so_far = max(trade.get('highest_price', 0), current_price)
+                    if highest_price_so_far > trade.get('highest_price', 0):
+                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price_so_far, trade['id']))
+
                     # التحقق من الأهداف الأساسية أولاً
                     if current_price >= trade['take_profit']:
                         await self._close_trade(trade, "ناجحة (TP)", current_price)
                         return
                     
                     if current_price <= trade['stop_loss']:
-                        # --- [✅ الإصلاح الجديد: تمرير قرار وقف الربح للرجل الحكيم] ---
                         if trade['stop_loss'] > trade['entry_price']:
-                            # إذا كان وقف ربح، لا نغلق فورًا، بل نطلب تأكيدًا من الرجل الحكيم
                             logger.warning(f"PROFIT STOP HIT for trade #{trade['id']}. Handing off to Wise Man for momentum confirmation.")
                             await conn.execute("UPDATE trades SET status = 'pending_profit_stop_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
                             await conn.commit()
                         else:
-                            # إذا كان وقف خسارة أولي، نطلب تأكيدًا عاديًا (لا تغيير هنا)
                             logger.warning(f"INITIAL Stop Loss hit for trade #{trade['id']} on {symbol}. Handing off to Wise Man.")
                             await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
                             await conn.commit()
                         return
-                    # ...
-                                            
-                        # 2. نعيد تحميل بيانات الصفقة لضمان أن المتغير المحلي trade محدّث بآخر قيمة
-                        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
-                        trade = dict(trade)
-                    # --- [نهاية الإصلاح] ---
+
+                    # --- [✅ تعديل جديد] ---
+                    # نعيد تحميل بيانات الصفقة لضمان أن المتغير المحلي trade محدّث بآخر قيمة (خصوصاً highest_price)
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                    trade = dict(trade)
 
                     # الآن نكمل باقي المنطق مع بيانات دقيقة ومحفوظة
                     if settings.get('trailing_sl_enabled', True):
@@ -1331,16 +1372,21 @@ class TradeGuardian:
                             new_sl = trade['entry_price'] * 1.001
                             if new_sl > trade['stop_loss']:
                                 await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                                # لا حاجة لـ conn.commit() هنا، سيتم في نهاية الدالة
                                 await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
                         
-                        # نعيد قراءة الصفقة للتأكد من حالة trailing_sl_active المحدثة
                         trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
                         if trade_after_activation and trade_after_activation['trailing_sl_active']:
-                            # نستخدم أعلى سعر من الصفقة المحدثة لضمان الدقة
-                            new_sl_candidate = trade_after_activation['highest_price'] * (1 - settings['trailing_sl_callback_percent'] / 100)
-                            if new_sl_candidate > trade_after_activation['stop_loss']:
-                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                            
+                            # --- [✅ الكود الجديد والكامل للوقف المتحرك الديناميكي] ---
+                            current_atr = await self._get_atr(symbol)
+                            if current_atr:
+                                atr_multiplier = settings.get('atr_trailing_multiplier', 2.5) 
+                                new_sl_candidate = trade_after_activation['highest_price'] - (current_atr * atr_multiplier)
+                                
+                                if new_sl_candidate > trade_after_activation['stop_loss']:
+                                    await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                                    logger.info(f"ATR Trailing SL for #{trade['id']} updated to {new_sl_candidate:.4f}")
+                            # --- [نهاية الكود الجديد] ---
 
                     if settings.get('incremental_notifications_enabled', True):
                         last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
@@ -1370,6 +1416,7 @@ class TradeGuardian:
 
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
@@ -1379,7 +1426,6 @@ class TradeGuardian:
 
         try:
             base_currency = symbol.split('/')[0]
-            # --- [✅ إصلاح وتأكيد] ---
             balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
             if not balance:
                 logger.error(f"Closure for #{trade_id} failed: Could not fetch balance.", extra=log_ctx)
@@ -1395,8 +1441,6 @@ class TradeGuardian:
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
 
-            # --- [✅ الإصلاح الحاسم لمشكلة البيع اليدوي] ---
-            # `exchange.market()` هي دالة فورية ولا تحتاج إلى await أو safe_api_call.
             try:
                 market = bot_data.exchange.market(symbol)
                 if not market: raise Exception("Market data not found in cache")
@@ -1418,14 +1462,12 @@ class TradeGuardian:
 
             if min_amount and quantity_to_sell < min_amount:
                 logger.warning(f"Closure for #{trade_id} failed: Rounded quantity {quantity_to_sell} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
-                # نفس منطق الإغلاق كغبار
                 async with aiosqlite.connect(DB_FILE) as conn:
                     await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
                     await conn.commit()
                 await bot_data.public_ws.unsubscribe([symbol])
                 return
 
-            # --- [✅ تطبيق safe_api_call على أمر البيع] ---
             await safe_api_call(lambda: bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell))
 
             pnl = (close_price - trade['entry_price']) * trade['quantity']
@@ -1437,7 +1479,6 @@ class TradeGuardian:
 
             await bot_data.public_ws.unsubscribe([symbol])
 
-            # --- [✅ الجزء الذي كان ناقصاً: بناء رسالة الإغ النهائية] ---
             try:
                 start_dt = datetime.fromisoformat(trade['timestamp'])
                 end_dt = datetime.now(EGYPT_TZ)
@@ -1490,6 +1531,7 @@ class TradeGuardian:
                 await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
                 await conn.commit()
             await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
+
     async def sync_subscriptions(self):
         try:
             async with aiosqlite.connect(DB_FILE) as conn:
