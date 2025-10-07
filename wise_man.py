@@ -291,17 +291,22 @@ class WiseMan:
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
     # ==============================================================================
     async def review_active_trades_with_tactics(self, context: object = None):
-        """يراجع الصفقات النشطة لتمديد الأهداف أو قطع الخسائر استباقيًا."""
-        logger.info("🧠 Wise Man: Running tactical review (Exits & Extensions)...")
+        """
+        [النسخة المصححة] يراجع الصفقات النشطة لتمديد الأهداف وتأمين الأرباح بشكل متدرج عند اقتراب السعر من الهدف،
+        أو يقطع الخسائر استباقيًا للصفقات الضعيفة.
+        """
+        logger.info("🧠 Wise Man: Running tactical review (Intelligent Trailing & Proactive Exits)...")
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
             try:
+                # جلب بيانات البيتكوين مرة واحدة لتقليل طلبات API
                 async with self.request_semaphore:
                     btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=20)
                 btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 btc_momentum_is_negative = ta.mom(btc_df['close'], length=10).iloc[-1] < 0
-            except Exception: btc_momentum_is_negative = False
+            except Exception:
+                btc_momentum_is_negative = False
 
             for trade_data in active_trades:
                 trade = dict(trade_data)
@@ -309,11 +314,15 @@ class WiseMan:
                 try:
                     async with self.request_semaphore:
                         ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
+                    if not ohlcv:
+                        continue
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     current_price = df['close'].iloc[-1]
-                    
+
+                    # --- المنطق الأول: الخروج الاستباقي من الصفقات الضعيفة والعالقة ---
                     trade_open_time = datetime.fromisoformat(trade['timestamp'])
                     minutes_since_open = (datetime.now(timezone.utc).astimezone(trade_open_time.tzinfo) - trade_open_time).total_seconds() / 60
+                    
                     if minutes_since_open > 45:
                         df['ema_slow'] = ta.ema(df['close'], length=30)
                         if current_price < (df['ema_slow'].iloc[-1] * 0.995) and btc_momentum_is_negative and current_price < trade['entry_price']:
@@ -322,24 +331,55 @@ class WiseMan:
                             await conn.commit()
                             from okx_maestro import safe_send_message
                             await safe_send_message(self.application.bot, f"🧠 **إنذار ضعف! | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا مستمرًا، جاري مراجعة الخروج.")
-                            continue
+                            continue # ننتقل للصفقة التالية بعد طلب الخروج
+
+                    # --- المنطق الثاني: التمديد والتأمين الذكي المتدرج للصفقات القوية ---
+                    settings = self.bot_data.settings
+                    strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
                     
-                    strong_profit_pct = self.bot_data.settings.get('wise_man_strong_profit_pct', 3.0)
-                    strong_adx_level = self.bot_data.settings.get('wise_man_strong_adx_level', 30)
-                    current_profit_pct = (current_price / trade['entry_price'] - 1) * 100
-                    if current_profit_pct > strong_profit_pct:
+                    # نسبة الاقتراب من الهدف المطلوبة لتفعيل التمديد (يمكن إضافتها للإعدادات)
+                    PROXIMITY_PERCENT = 0.98  # يعني عندما يصل السعر إلى 98% من الهدف
+
+                    # الشرط الجديد: هل السعر اقترب من الهدف الحالي؟
+                    price_is_near_target = current_price >= (trade['take_profit'] * PROXIMITY_PERCENT)
+
+                    if price_is_near_target:
                         adx_data = ta.adx(df['high'], df['low'], df['close'])
                         current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 0
+
+                        # شرط الزخم لا يزال مطلوبًا
                         if current_adx > strong_adx_level:
-                            new_tp = trade['take_profit'] * 1.05
-                            await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id'],)); await conn.commit()
-                            logger.info(f"Wise Man extended TP for trade #{trade['id']} on {symbol} to {new_tp}")
+                            # --- المنطق الجديد لتحديد الأهداف والوقف ---
+                            previous_tp = trade['take_profit']
+                            
+                            # 1. الهدف الجديد يكون أعلى من الهدف السابق بنسبة 5% (يمكن تعديلها)
+                            new_tp = previous_tp * 1.05
+                            
+                            # 2. الوقف الجديد هو الهدف السابق (أو تحته بـ 1% للأمان من الانزلاق السعري)
+                            new_sl = previous_tp * 0.99
+
+                            # 3. تحديث الهدف والوقف معًا في أمر واحد
+                            await conn.execute(
+                                "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
+                                (new_tp, new_sl, trade['id'],)
+                            )
+                            await conn.commit()
+                            
+                            logger.info(f"Wise Man extended TP to {new_tp} and TRAILED SL to {new_sl} for trade #{trade['id']}")
+                            
                             from okx_maestro import safe_send_message
-                            await safe_send_message(self.application.bot, f"🧠 **تمديد الهدف! | #{trade['id']} {symbol}**\nتم رصد زخم قوي، تم رفع الهدف إلى `${new_tp:.4f}`")
-                    await asyncio.sleep(2)
+                            locked_in_profit_pct = (new_sl / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+                            await safe_send_message(
+                                self.application.bot,
+                                f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
+                                f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
+                                f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
+                                f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
+                            )
+
+                    await asyncio.sleep(2) # فاصل بسيط بين معالجة كل صفقة
                 except Exception as e:
                     logger.error(f"Wise Man: Error during tactical review for {symbol}: {e}", exc_info=True)
-
     # ==============================================================================
     # --- ♟️ المدير الاستراتيجي (يعمل كل ساعة) ♟️ ---
     # ==============================================================================
