@@ -286,12 +286,19 @@ class WiseMan:
         # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
     # ==============================================================================
+    # الملف: wise_man.py
+# استبدل الدالة التالية بالكامل
+
+    # ==============================================================================
+    # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
+    # ==============================================================================
     async def review_active_trades_with_tactics(self, context: object = None):
         """
-        [النسخة النهائية والمصححة رياضيًا] يراجع الصفقات النشطة لتمديد الأهداف وتأمين الأرباح بشكل متدرج
-        فقط عندما يكمل السعر نسبة كبيرة من طريقه نحو الهدف المحدد.
+        [النسخة المحدثة] هذه الدالة الآن مسؤولة فقط عن التحليلات التكتيكية البطيئة،
+        مثل كشف الضعف المستمر في الصفقات التي استمرت لفترة طويلة.
+        تم نقل منطق تمديد الهدف إلى TradeGuardian للاستجابة الفورية.
         """
-        logger.info("🧠 Wise Man: Running tactical review (Intelligent Trailing & Proactive Exits)...")
+        logger.info("🧠 Wise Man: Running slow tactical review (Sustained Weakness Check)...")
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
@@ -307,89 +314,31 @@ class WiseMan:
                 trade = dict(trade_data)
                 symbol = trade['symbol']
                 try:
-                    async with self.request_semaphore:
-                        ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
-                    if not ohlcv:
-                        continue
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    current_price = df['close'].iloc[-1]
-
-                    # ... (منطق الخروج الاستباقي يبقى كما هو)
+                    # منطق الخروج الاستباقي للضعف المستمر (يبقى كما هو)
                     trade_open_time = datetime.fromisoformat(trade['timestamp'])
                     minutes_since_open = (datetime.now(timezone.utc).astimezone(trade_open_time.tzinfo) - trade_open_time).total_seconds() / 60
+                    
                     if minutes_since_open > 45:
+                        async with self.request_semaphore:
+                            ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
+                        if not ohlcv:
+                            continue
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        current_price = df['close'].iloc[-1]
+                        
                         df['ema_slow'] = ta.ema(df['close'], length=30)
                         if current_price < (df['ema_slow'].iloc[-1] * 0.995) and btc_momentum_is_negative and current_price < trade['entry_price']:
                             logger.warning(f"Wise Man proactively detected SUSTAINED weakness in {symbol}. Requesting exit.")
                             await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ?", (trade['id'],))
                             await conn.commit()
+                            
+                            # تحديث الذاكرة
+                            if symbol in self.bot_data.active_trades_cache:
+                                self.bot_data.active_trades_cache[symbol]['status'] = 'pending_exit_confirmation'
+
                             from okx_maestro import safe_send_message
                             await safe_send_message(self.application.bot, f"🧠 **إنذار ضعف! | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا مستمرًا، جاري مراجعة الخروج.")
                             continue
-
-                    # --- [✅ الإصلاح الرياضي النهائي لمنطق الهلوسة] ---
-                    settings = self.bot_data.settings
-                    strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
-                    PROXIMITY_PERCENT = 0.95 # يجب أن يكمل السعر 95% من طريقه للهدف
-
-                    # 1. نحسب نطاق الربح الكامل (المسافة بين الدخول والهدف)
-                    if trade['entry_price'] > 0:
-                        profit_range = trade['take_profit'] - trade['entry_price']
-                    else: # حالة نادرة لتجنب القسمة على صفر
-                        profit_range = 0
-
-                    if profit_range > 0:
-                        # 2. نحسب السعر المستهدف لتفعيل التمديد
-                        trigger_price = trade['entry_price'] + (profit_range * PROXIMITY_PERCENT)
-                        # 3. الشرط الجديد والصحيح
-                        price_is_near_target = current_price >= trigger_price
-                    else:
-                        price_is_near_target = False
-
-                    if price_is_near_target:
-                        # --- [✅ تعديل جديد] --- إضافة حساب RSI
-                        df.ta.rsi(length=14, append=True)
-                        current_rsi = df['RSI_14'].iloc[-1]
-                        # --- [نهاية التعديل] ---
-
-                        adx_data = ta.adx(df['high'], df['low'], df['close'])
-                        current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 0
-
-                        # --- [✅ تعديل جديد] --- إضافة شرط RSI إلى القرار
-                        if current_adx > strong_adx_level and current_rsi < 80:
-                            previous_tp = trade['take_profit']
-                            new_tp = previous_tp * 1.05
-                            new_sl = trigger_price # هذا هو الإصلاح الذي نفذته بالفعل
-                            await conn.execute(
-                                "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
-                                (new_tp, new_sl, trade['id'],)
-                            )
-                            await conn.commit()
-                            logger.info(f"Wise Man extended TP to {new_tp} and TRAILED SL to {new_sl} for trade #{trade['id']} due to strong momentum (ADX: {current_adx:.2f}, RSI: {current_rsi:.2f}).")
-                            from okx_maestro import safe_send_message
-                            locked_in_profit_pct = (new_sl / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-                            await safe_send_message(
-                                self.application.bot,
-                                f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
-                                f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
-                                f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
-                                f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
-                            )
-                        # --- [✅ تعديل جديد] --- إضافة تسجيل حالة عدم التمديد
-                        elif current_adx > strong_adx_level and current_rsi >= 80:
-                            logger.info(f"Wise Man decided NOT to extend TP for #{trade['id']}. ADX is strong ({current_adx:.2f}) but RSI is overbought ({current_rsi:.2f}).")
-                        # --- [نهاية التعديل] ---
-
-                            from okx_maestro import safe_send_message
-                            locked_in_profit_pct = (new_sl / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-                            await safe_send_message(
-                                self.application.bot,
-                                f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
-                                f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
-                                f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
-                                f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
-                            )
-                    # --- [نهاية الإصلاح] ---
                     
                     await asyncio.sleep(2)
                 except Exception as e:
