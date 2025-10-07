@@ -183,6 +183,7 @@ DEFAULT_SETTINGS = {
     "wise_guardian_enabled": True,
     "wise_guardian_trigger_pct": -1.5,
     "min_win_probability": 0.60,
+    "anomaly_candle_multiplier": 5.0,
     
 }
 
