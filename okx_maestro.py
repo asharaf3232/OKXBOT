@@ -1306,18 +1306,20 @@ class TradeGuardian:
                         return
                     
                     if current_price <= trade['stop_loss']:
-                        logger.warning(f"Trade #{trade['id']} for {trade['symbol']} hit its Stop Loss. Handing off to Wise Man for final confirmation.")
-                        await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
-                        await conn.commit()
+                        # --- [✅ الإصلاح الجديد: تمرير قرار وقف الربح للرجل الحكيم] ---
+                        if trade['stop_loss'] > trade['entry_price']:
+                            # إذا كان وقف ربح، لا نغلق فورًا، بل نطلب تأكيدًا من الرجل الحكيم
+                            logger.warning(f"PROFIT STOP HIT for trade #{trade['id']}. Handing off to Wise Man for momentum confirmation.")
+                            await conn.execute("UPDATE trades SET status = 'pending_profit_stop_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
+                            await conn.commit()
+                        else:
+                            # إذا كان وقف خسارة أولي، نطلب تأكيدًا عاديًا (لا تغيير هنا)
+                            logger.warning(f"INITIAL Stop Loss hit for trade #{trade['id']} on {symbol}. Handing off to Wise Man.")
+                            await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
+                            await conn.commit()
                         return
-
-                    # --- [✅ الإصلاح الحاسم لمشكلة تتبع أعلى سعر] ---
-                    highest_price = max(trade.get('highest_price', 0), current_price)
-                    if highest_price > trade.get('highest_price', 0):
-                        # 1. نقوم بتحديث وحفظ أعلى سعر فورًا وبشكل مستقل لضمان عدم ضياعه
-                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
-                        await conn.commit()
-                        
+                    # ...
+                                            
                         # 2. نعيد تحميل بيانات الصفقة لضمان أن المتغير المحلي trade محدّث بآخر قيمة
                         trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
                         trade = dict(trade)
