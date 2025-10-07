@@ -283,20 +283,19 @@ class WiseMan:
                     logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
                     await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
 
-    # ==============================================================================
+    #     # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
     # ==============================================================================
     async def review_active_trades_with_tactics(self, context: object = None):
         """
-        [النسخة المصححة] يراجع الصفقات النشطة لتمديد الأهداف وتأمين الأرباح بشكل متدرج عند اقتراب السعر من الهدف،
-        أو يقطع الخسائر استباقيًا للصفقات الضعيفة.
+        [النسخة النهائية والمصححة رياضيًا] يراجع الصفقات النشطة لتمديد الأهداف وتأمين الأرباح بشكل متدرج
+        فقط عندما يكمل السعر نسبة كبيرة من طريقه نحو الهدف المحدد.
         """
         logger.info("🧠 Wise Man: Running tactical review (Intelligent Trailing & Proactive Exits)...")
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
             try:
-                # جلب بيانات البيتكوين مرة واحدة لتقليل طلبات API
                 async with self.request_semaphore:
                     btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=20)
                 btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -315,10 +314,9 @@ class WiseMan:
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     current_price = df['close'].iloc[-1]
 
-                    # --- المنطق الأول: الخروج الاستباقي من الصفقات الضعيفة والعالقة ---
+                    # ... (منطق الخروج الاستباقي يبقى كما هو)
                     trade_open_time = datetime.fromisoformat(trade['timestamp'])
                     minutes_since_open = (datetime.now(timezone.utc).astimezone(trade_open_time.tzinfo) - trade_open_time).total_seconds() / 60
-                    
                     if minutes_since_open > 45:
                         df['ema_slow'] = ta.ema(df['close'], length=30)
                         if current_price < (df['ema_slow'].iloc[-1] * 0.995) and btc_momentum_is_negative and current_price < trade['entry_price']:
@@ -327,42 +325,41 @@ class WiseMan:
                             await conn.commit()
                             from okx_maestro import safe_send_message
                             await safe_send_message(self.application.bot, f"🧠 **إنذار ضعف! | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا مستمرًا، جاري مراجعة الخروج.")
-                            continue # ننتقل للصفقة التالية بعد طلب الخروج
+                            continue
 
-                    # --- المنطق الثاني: التمديد والتأمين الذكي المتدرج للصفقات القوية ---
+                    # --- [✅ الإصلاح الرياضي النهائي لمنطق الهلوسة] ---
                     settings = self.bot_data.settings
                     strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
-                    
-                    # نسبة الاقتراب من الهدف المطلوبة لتفعيل التمديد (يمكن إضافتها للإعدادات)
-                    PROXIMITY_PERCENT = 0.98  # يعني عندما يصل السعر إلى 98% من الهدف
+                    PROXIMITY_PERCENT = 0.95 # يجب أن يكمل السعر 95% من طريقه للهدف
 
-                    # الشرط الجديد: هل السعر اقترب من الهدف الحالي؟
-                    price_is_near_target = current_price >= (trade['take_profit'] * PROXIMITY_PERCENT)
+                    # 1. نحسب نطاق الربح الكامل (المسافة بين الدخول والهدف)
+                    if trade['entry_price'] > 0:
+                        profit_range = trade['take_profit'] - trade['entry_price']
+                    else: # حالة نادرة لتجنب القسمة على صفر
+                        profit_range = 0
+
+                    if profit_range > 0:
+                        # 2. نحسب السعر المستهدف لتفعيل التمديد
+                        trigger_price = trade['entry_price'] + (profit_range * PROXIMITY_PERCENT)
+                        # 3. الشرط الجديد والصحيح
+                        price_is_near_target = current_price >= trigger_price
+                    else:
+                        price_is_near_target = False
 
                     if price_is_near_target:
                         adx_data = ta.adx(df['high'], df['low'], df['close'])
                         current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 0
 
-                        # شرط الزخم لا يزال مطلوبًا
                         if current_adx > strong_adx_level:
-                            # --- المنطق الجديد لتحديد الأهداف والوقف ---
                             previous_tp = trade['take_profit']
-                            
-                            # 1. الهدف الجديد يكون أعلى من الهدف السابق بنسبة 5% (يمكن تعديلها)
                             new_tp = previous_tp * 1.05
-                            
-                            # 2. الوقف الجديد هو الهدف السابق (أو تحته بـ 1% للأمان من الانزلاق السعري)
                             new_sl = previous_tp * 0.99
-
-                            # 3. تحديث الهدف والوقف معًا في أمر واحد
                             await conn.execute(
                                 "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
                                 (new_tp, new_sl, trade['id'],)
                             )
                             await conn.commit()
-                            
                             logger.info(f"Wise Man extended TP to {new_tp} and TRAILED SL to {new_sl} for trade #{trade['id']}")
-                            
                             from okx_maestro import safe_send_message
                             locked_in_profit_pct = (new_sl / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
                             await safe_send_message(
@@ -372,11 +369,12 @@ class WiseMan:
                                 f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
                                 f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
                             )
-
-                    await asyncio.sleep(2) # فاصل بسيط بين معالجة كل صفقة
+                    # --- [نهاية الإصلاح] ---
+                    
+                    await asyncio.sleep(2)
                 except Exception as e:
                     logger.error(f"Wise Man: Error during tactical review for {symbol}: {e}", exc_info=True)
-    # ==============================================================================
+ ==============================================================================
     # --- ♟️ المدير الاستراتيجي (يعمل كل ساعة) ♟️ ---
     # ==============================================================================
     async def review_portfolio_risk(self, context: object = None):
