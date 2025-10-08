@@ -282,50 +282,49 @@ class WiseMan:
 
     async def intelligent_reviewer_job(self, context: object = None):
         """
-        [New Function] The Intelligent Reviewer: Re-runs the original entry signal analysis to ensure the trade is still valid.
+        [دالة جديدة] المراجع الذكي: يعيد تشغيل تحليل الإشارة الأصلية لضمان أن الصفقة لم تعد صالحة.
         """
         logger.info("🧠 Intelligent Reviewer: Reviewing active trades for signal validity...")
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
         
-        # Use a local import to prevent circular dependency issues
+        # استيراد محلي لتجنب أي مشاكل تعارض
         from okx_maestro import SCANNERS, TIMEFRAME, safe_api_call 
         
         for trade_data in active_trades:
             trade = dict(trade_data)
             symbol = trade['symbol']
             
-            # Extract the primary strategy from the entry reason
+            # استخلاص الاستراتيجية الأساسية من سبب الدخول
             primary_reason = trade['reason'].split(' (')[0].split(' + ')[0].strip()
 
             if primary_reason not in SCANNERS:
                 continue
 
             try:
-                # Fetch the current data for the symbol
+                # جلب البيانات الحالية للعملة
                 ohlcv = await safe_api_call(lambda: self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220))
                 if not ohlcv or len(ohlcv) < 50:
                     continue
                 
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 
-                # Re-run the same analysis function that triggered the signal
+                # إعادة تشغيل نفس دالة التحليل التي ولدت الإشارة
                 analyzer_func = SCANNERS[primary_reason]
                 params = self.bot_data.settings.get(primary_reason, {})
                 
-                # Prepare the arguments for the analysis function
                 func_args = {'df': df.copy(), 'params': params, 'rvol': 0, 'adx_value': 0}
                 if primary_reason in ['support_rebound']:
                     func_args.update({'exchange': self.exchange, 'symbol': symbol})
                 
                 result = await analyzer_func(**func_args) if asyncio.iscoroutinefunction(analyzer_func) else analyzer_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
                 
-                # If the signal is no longer valid, close the trade
+                # إذا لم تعد الإشارة صالحة، قم بإغلاق الصفقة
                 if not result:
                     logger.warning(f"Intelligent Reviewer: Signal '{primary_reason}' for trade #{trade['id']} is now INVALID. Closing trade.")
                     current_price = df['close'].iloc[-1]
-                    # Directly call the guardian's close function
+                    # استدعاء دالة الإغلاق مباشرة من الحارس
                     await self.bot_data.trade_guardian._close_trade(trade, f"إغلاق (إشارة لم تعد صالحة)", current_price)
                     
             except Exception as e:
