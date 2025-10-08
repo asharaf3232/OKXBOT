@@ -4015,12 +4015,7 @@ async def post_init(application: Application):
     jq.run_repeating(
         perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan"
     )
-    jq.run_repeating(
-        wise_man.run_realtime_review,
-        interval=10,
-        first=5,
-        name="wise_man_realtime_engine",
-    )
+
     jq.run_repeating(
         the_supervisor_job,
         interval=SUPERVISOR_INTERVAL_SECONDS,
