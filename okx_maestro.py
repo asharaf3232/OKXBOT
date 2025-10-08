@@ -2402,34 +2402,27 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
     await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
 
     try:
-async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    trade_id = int(query.data.split('_')[-1])
-
-    await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
-
-    try:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             trade = await (await conn.execute("SELECT * FROM trades WHERE id = ? AND status = 'active'", (trade_id,))).fetchone()
 
         if not trade:
             await query.answer("لم يتم العثور على الصفقة أو أنها ليست نشطة.", show_alert=True)
-            await show_trades_command(update, context) # افترض وجود هذه الدالة لإعادة عرض الصفقات
+            await show_trades_command(update, context)
             return
 
         trade = dict(trade)
         ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
-        if not ticker:
+        if not ticker or 'last' not in ticker:
             await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: تعذر جلب السعر الحالي.")
             await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
             return
-            
+
         current_price = ticker['last']
-        
-        # --- هذا هو السطر الذي تم تصحيحه ---
+
+        # Use TradeGuardian to perform closure logic
         await bot_data.trade_guardian._close_trade(trade, "إغلاق يدوي", current_price)
-        
+
         await query.answer("✅ تم إرسال أمر البيع بنجاح!")
 
     except Exception as e:
