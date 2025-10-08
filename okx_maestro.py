@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Maestro Bot V8.1 (Final & Stable) 🚀 ---
+# --- 🚀 OKX Maestro Bot V9.2 (Architectural Refactor) 🚀 ---
 # =======================================================================================
+#
+# --- سجل التغييرات للإصدار 9.2 (تطوير معماري) ---
+#   ✅ [هيكلة] **توحيد إدارة الصفقات:** تم إعادة هيكلة منطق التداول. أصبح `WiseMan` يعمل كـ "مستشار استراتيجي" يقدم توصيات فقط.
+#   ✅ [هيكلة] **تمكين TradeGuardian:** أصبح `TradeGuardian` هو "المنفذ الوحيد" المسؤول عن تطبيق توصيات `WiseMan` وإدارة كل تعديلات الصفقات بشكل لحظي.
+#   ✅ [منع التعارض] **إزالة حالة التسابق (Race Condition):** التصميم الجديد يزيل تمامًا أي تعارض بين المكونات ويضمن تنفيذًا آمنًا لتحديثات الصفقات.
 #
 # --- سجل التغييرات للإصدار 8.1 (ترقية هيكلية) ---
 #   ✅ [ميزة] **رسائل مهيكلة:** إضافة دالة `build_enriched_message` لإنشاء رسائل وتقارير غنية بالبيانات (احتمالية نجاح، نصائح).
@@ -245,6 +250,7 @@ class BotState:
         self.pending_strategy_proposal = {}
         self.last_deep_analysis_time = defaultdict(float)
         self.trade_management_lock = asyncio.Lock()
+        self.trade_update_recommendations = {}
 
 bot_data = BotState()
 wise_man = None
@@ -1301,6 +1307,33 @@ class TradeGuardian:
                     trade = dict(trade)
                     settings = bot_data.settings
 
+                    # Check for Wise Man's recommendation
+                    if trade['id'] in bot_data.trade_update_recommendations:
+                        recommendation = bot_data.trade_update_recommendations.pop(trade['id'])
+                        new_tp = recommendation['new_tp']
+                        new_sl = recommendation['new_sl']
+                        entry_price = recommendation['entry_price']
+
+                        await conn.execute(
+                            "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
+                            (new_tp, new_sl, trade['id'],)
+                        )
+                        await conn.commit()
+                        
+                        logger.info(f"TradeGuardian applied Wise Man's recommendation for trade #{trade['id']}. New TP: {new_tp}, New SL: {new_sl}")
+                        
+                        locked_in_profit_pct = (new_sl / entry_price - 1) * 100 if entry_price > 0 else 0
+                        await safe_send_message(
+                            self.application.bot,
+                            f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
+                            f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
+                            f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
+                            f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
+                        )
+                        # We should re-fetch the trade to have the updated values
+                        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                        trade = dict(trade)
+
                     # التحقق من الأهداف الأساسية أولاً
                     if current_price >= trade['take_profit']:
                         await self._close_trade(trade, "ناجحة (TP)", current_price)
@@ -1540,7 +1573,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
 # --- واجهة تليجرام ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في **بوت OKX V8.1 (النسخة النهائية)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("أهلاً بك في **بوت OKX V9.2 (التطوير المعماري)**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled: await (update.message or update.callback_query.message).reply_text("🔬 الفحص محظور. مفتاح الإيقاف مفعل."); return
@@ -2373,7 +2406,7 @@ async def post_init(application: Application):
     jq.run_repeating(wise_man.train_ml_model, interval=604800, first=3600, name="wise_man_ml_train")
 
     logger.info(f"All jobs scheduled. OKX Bot is fully operational.")
-    await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX (مصحح V9.1) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX (معماري V9.2) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
 async def post_shutdown(application: Application):
     logger.info("Bot shutdown initiated...")
     if bot_data.websocket_manager:
