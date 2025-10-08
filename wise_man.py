@@ -1,19 +1,12 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🧠 Wise Man V3.0 (Strategic Advisor) 🧠 ---
+# --- 🧠 Maestro V9.2 (Strategic Protocol Assigner) 🧠 ---
 # =======================================================================================
 #
-# --- سجل التغييرات للإصدار 3.0 (التطوير المعماري) ---
-#   ✅ [هيكلة] **تحويل إلى مستشار:** تم تغيير دور `WiseMan` بشكل جوهري. لم يعد يقوم بتعديل الصفقات مباشرة.
-#   ✅ [هيكلة] **نظام التوصيات:** يقوم الآن بتحليل الصفقات النشطة وتقديم "توصيات" بتمديد الأهداف وتحديث الوقف.
-#   ✅ [تكامل] **تسليم السلطة:** يتم إرسال التوصيات إلى `TradeGuardian` (المنفذ) ليقوم هو بتطبيقها، مما يضمن مركزية القرار.
-#
-# --- سجل التغييرات للإصدار 2.0 (ترقية الذكاء الاصطناعي) ---
-#   ✅ [ميزة ML] **التنبؤ بالنجاح:** إضافة نموذج `LogisticRegression` للتدريب على الصفقات التاريخية والتنبؤ باحتمالية نجاح الصفقات الجديدة.
-#   ✅ [ميزة ML] **رفض الصفقات الخطرة:** يتم الآن رفض المرشحين للتداول تلقائيًا إذا كانت احتمالية النجاح المتوقعة أقل من 60%.
-#   ✅ [ميزة ديناميكية] **إدارة حجم الصفقة:** تعديل حجم الصفقة ديناميكيًا بناءً على تقلب (ATR)، وتقليل المخاطرة في الأسواق شديدة التقلب.
-#   ✅ [ميزة ديناميكية] **تحليل الارتباط:** إضافة فحص الارتباط مع BTC ورفض الصفقات شديدة الارتباط (>0.8) لتجنب المخاطر النظامية.
-#   ✅ [ميزة تكاملية] **دمج تحليل المشاعر:** قرارات الخروج أصبحت أكثر حساسية، حيث يتم تشديد وقف الخسارة تلقائيًا عند وجود مشاعر سلبية في السوق.
+# --- سجل التغييرات للإصدار 9.2 (التطوير المعماري) ---
+#   ✅ [هيكلة] **تحويل إلى المايسترو:** تم تغيير دور `WiseMan` بشكل جذري. لم يعد يقدم توصيات تكتيكية للصفقات المفتوحة.
+#   ✅ [هيكلة] **نظام البروتوكولات:** يقوم الآن بتحليل كل فرصة تداول "قبل" فتحها، ويحدد لها "بروتوكول إدارة" مخصص (1, 2, أو 3).
+#   ✅ [تكامل] **تسليم السلطة الكامل:** يتم تسجيل البروتوكول مع الصفقة، ويصبح `TradeGuardian` هو المنفذ الوحيد المسؤول عن تطبيق قواعد هذا البروتوكول لحظيًا.
 #
 # =======================================================================================
 
@@ -26,7 +19,7 @@ from telegram.ext import Application
 from collections import defaultdict, deque
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 
 # --- [تعديل V2.0] إضافة مكتبات جديدة ---
@@ -69,17 +62,16 @@ class WiseMan:
         self.db_file = db_file
         self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
         
-        # --- [تعديل V2.0] تهيئة مكونات تعلم الآلة وإدارة المخاطر ---
         self.ml_model = LogisticRegression() if SKLEARN_AVAILABLE else None
         self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
         self.model_trained = False
-        self.historical_features = deque(maxlen=200) # Buffer for potential future live training
+        self.historical_features = deque(maxlen=200) 
         
-        self.correlation_cache = {} # Cache for BTC correlation
-        self.request_semaphore = asyncio.Semaphore(3) # Rate limiting for Wise Man's own API calls
-        self.entry_event = asyncio.Event() # Event for signaling purposes
+        self.correlation_cache = {}
+        self.request_semaphore = asyncio.Semaphore(3)
+        self.entry_event = asyncio.Event()
         
-        logger.info("🧠 Wise Man module upgraded to V2.0 'ML Guardian & Maestro' model.")
+        logger.info("🧠 Wise Man module upgraded to V9.2 'Maestro' model.")
 
     # ==============================================================================
     # --- 🧠 محرك تعلم الآلة (يعمل أسبوعيًا) 🧠 ---
@@ -87,10 +79,10 @@ class WiseMan:
     async def train_ml_model(self, context: object = None):
         """تدريب نموذج تعلم الآلة على بيانات الصفقات التاريخية للتنبؤ بالنجاح."""
         if not SKLEARN_AVAILABLE:
-            logger.warning("Wise Man: Cannot train ML model, scikit-learn is not installed.")
+            logger.warning("Maestro: Cannot train ML model, scikit-learn is not installed.")
             return
 
-        logger.info("🧠 Wise Man: Starting weekly ML model training...")
+        logger.info("🧠 Maestro: Starting weekly ML model training...")
         features = []
         labels = []
         try:
@@ -99,7 +91,7 @@ class WiseMan:
                 closed_trades = await (await conn.execute("SELECT * FROM trades WHERE status LIKE '%(%' LIMIT 500")).fetchall()
 
             if len(closed_trades) < 20:
-                logger.warning(f"Wise Man: Not enough historical data to train ML model (found {len(closed_trades)} trades).")
+                logger.warning(f"Maestro: Not enough historical data to train ML model (found {len(closed_trades)} trades).")
                 return
             
             # Fetch BTC data for trend analysis
@@ -134,7 +126,7 @@ class WiseMan:
                     continue # Skip trade if data fetching fails
             
             if len(features) < 10:
-                logger.warning("Wise Man: Could not generate enough features for ML training.")
+                logger.warning("Maestro: Could not generate enough features for ML training.")
                 return
 
             X = np.array(features)
@@ -143,10 +135,70 @@ class WiseMan:
             X_scaled = self.scaler.fit_transform(X)
             self.ml_model.fit(X_scaled, y)
             self.model_trained = True
-            logger.info(f"🧠 Wise Man: ML model training complete. Trained on {len(X)} data points.")
+            logger.info(f"🧠 Maestro: ML model training complete. Trained on {len(X)} data points.")
         except Exception as e:
-            logger.error(f"Wise Man: An error occurred during ML model training: {e}", exc_info=True)
+            logger.error(f"Maestro: An error occurred during ML model training: {e}", exc_info=True)
 
+    # --- [V9.2] دوال مساعدة لـ "The Maestro" Protocol Assignment ---
+    def _determine_market_regime(self, atr_percent: float, adx_value: float) -> str:
+        """[V9.2] تحديد نظام السوق بناءً على التقلب والزخم."""
+        if atr_percent > 3.0:
+            return 'Volatile'
+        elif adx_value > 25:
+            return 'Trending'
+        else:
+            return 'Ranging'
+
+    def assign_management_protocol(self, signal_data: dict) -> tuple[int, int]:
+        """[V9.2] تعيين البروتوكول الإداري بناءً على نظام النقاط غير القابل للتفاوض."""
+        score = 0
+        strategy = signal_data.get('strategy', '')
+        atr_percent = signal_data.get('atr_percent', 1.0)
+        market_regime = self._determine_market_regime(atr_percent, signal_data.get('adx_value', 20))
+        win_prob = signal_data.get('win_prob', 0.5)
+
+        # 1. حسب الاستراتيجية
+        primary_strategy = strategy.split(' + ')[0]
+        if primary_strategy in ['momentum_breakout', 'breakout_squeeze_pro']:
+            score += 3
+        elif primary_strategy in ['supertrend_pullback', 'rsi_divergence']:
+            score += 2
+        else:
+            score += 1
+
+        # 2. حسب تقلب الأصل (ATR)
+        if atr_percent > 3.0:
+            score += 3
+        elif 1.5 <= atr_percent <= 3.0:
+            score += 2
+        else:
+            score += 1
+
+        # 3. حسب حالة السوق
+        if market_regime == 'Volatile':
+            score += 3
+        elif market_regime == 'Trending':
+            score += 2
+        else:
+            score += 1
+
+        # 4. حسب احتمالية النجاح (ML)
+        if win_prob > 0.75:
+            score += 3
+        elif 0.60 < win_prob <= 0.75:
+            score += 2
+        else:
+            score += 1
+
+        # القرار النهائي
+        if score <= 5:
+            protocol_id = 1
+        elif 6 <= score <= 9:
+            protocol_id = 2
+        else: # score >= 10
+            protocol_id = 3
+
+        return protocol_id, score
 
     # ==============================================================================
     # --- 🚀 المحرك الرئيسي السريع (يعمل كل 10 ثوانٍ) 🚀 ---
@@ -160,7 +212,7 @@ class WiseMan:
     # --- 1. منطق "نقطة الدخول الممتازة" (جزء من المحرك السريع) ---
     # ==============================================================================
     async def _review_pending_entries(self):
-        """يراجع الفرص المرشحة ويقتنص أفضل لحظة للدخول باستخدام ML وتحليل المخاطر."""
+        """[V9.2] يراجع الفرص، ويعين البروتوكول، ثم يسلمها للتنفيذ."""
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             candidates = await (await conn.execute("SELECT * FROM trade_candidates WHERE status = 'pending'")).fetchall()
@@ -168,7 +220,6 @@ class WiseMan:
                 candidate = dict(cand_data)
                 symbol = candidate['symbol']
                 
-                # Check for existing trade
                 trade_exists = await (await conn.execute("SELECT 1 FROM trades WHERE symbol = ? AND status IN ('active', 'pending')", (symbol,))).fetchone()
                 if trade_exists:
                     await conn.execute("UPDATE trade_candidates SET status = 'cancelled_duplicate' WHERE id = ?", (candidate['id'],)); await conn.commit()
@@ -179,68 +230,74 @@ class WiseMan:
                         ticker = await self.exchange.fetch_ticker(symbol)
                         ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
                     
-                    # 1. Price check
                     current_price = ticker['last']
                     signal_price = candidate['entry_price']
                     if not (0.995 * signal_price <= current_price <= 1.005 * signal_price):
                         if current_price > 1.01 * signal_price:
-                            logger.info(f"Wise Man cancels {symbol}: Price moved too far.")
+                            logger.info(f"Maestro cancels {symbol}: Price moved too far.")
                             await conn.execute("UPDATE trade_candidates SET status = 'cancelled_price_moved' WHERE id = ?", (candidate['id'],))
                         elif time.time() - datetime.fromisoformat(candidate['timestamp']).timestamp() > 180:
-                            logger.info(f"Wise Man cancels {symbol}: Candidate expired.")
+                            logger.info(f"Maestro cancels {symbol}: Candidate expired.")
                             await conn.execute("UPDATE trade_candidates SET status = 'cancelled_expired' WHERE id = ?", (candidate['id'],))
                         await conn.commit()
                         continue
 
-                    # 2. Dynamic Sizing based on Volatility
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
                     atr_percent = (atr / current_price) * 100
-                    if atr_percent > 1.0:
-                        original_size = candidate.get('trade_size', self.bot_data.settings['real_trade_size_usdt'])
-                        new_size = original_size * 0.75
-                        candidate['trade_size'] = new_size
-                        logger.info(f"Wise Man: High volatility detected in {symbol} ({atr_percent:.2f}%). Reducing trade size to ${new_size:.2f}.")
+                    
+                    # --- [V9.2] جمع كل البيانات اللازمة لقرار المايسترو ---
+                    adx_data = ta.adx(df['high'], df['low'], df['close'])
+                    adx_value = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 25
 
-                    # 3. Correlation Check
                     correlation = await self._get_correlation(symbol, df)
                     if correlation > 0.8:
-                        logger.warning(f"Wise Man rejects {symbol}: High correlation with BTC ({correlation:.2f}).")
+                        logger.warning(f"Maestro rejects {symbol}: High correlation with BTC ({correlation:.2f}).")
                         await conn.execute("UPDATE trade_candidates SET status = 'rejected_correlation' WHERE id = ?", (candidate['id'],)); await conn.commit()
                         continue
 
-                    # 4. ML Win Probability Prediction
+                    win_prob = 0.5
                     if self.model_trained:
                         btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=51)
                         btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                         btc_ema_50 = ta.ema(btc_df['close'], length=50).iloc[-1]
                         btc_trend = 1 if btc_df['close'].iloc[-1] > btc_ema_50 else 0
                         
-                        adx_data = ta.adx(df['high'], df['low'], df['close'])
                         rsi = ta.rsi(df['close']).iloc[-1]
-                        adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None else 25
                         
-                        current_features = np.array([[rsi, adx, btc_trend]])
+                        current_features = np.array([[rsi, adx_value, btc_trend]])
                         scaled_features = self.scaler.transform(current_features)
                         win_prob = self.ml_model.predict_proba(scaled_features)[0][1]
                         candidate['win_prob'] = win_prob
 
-                        if win_prob < 0.6:
-                            logger.warning(f"Wise Man rejects {symbol}: Low ML win probability ({win_prob:.2f}).")
+                        if win_prob < self.bot_data.settings.get('min_win_probability', 0.6):
+                            logger.warning(f"Maestro rejects {symbol}: Low ML win probability ({win_prob:.2f}).")
                             await conn.execute("UPDATE trade_candidates SET status = 'rejected_ml_prob' WHERE id = ?", (candidate['id'],)); await conn.commit()
                             continue
+                    
+                    # --- [V9.2] هنا يتخذ المايسترو قراره الاستراتيجي ---
+                    maestro_input = {
+                        'strategy': candidate['reason'],
+                        'atr_percent': atr_percent,
+                        'adx_value': adx_value,
+                        'win_prob': win_prob
+                    }
+                    protocol_id, score = self.assign_management_protocol(maestro_input)
+                    candidate['management_protocol'] = protocol_id
+                    candidate['protocol_score'] = score
+                    logger.info(f"Maestro assigned Protocol {protocol_id} to {symbol} with score {score}.")
 
-                    # 5. Final Confirmation & Execution
-                    logger.info(f"Wise Man confirms entry for {symbol}. All checks passed. Initiating trade.")
+                    # 5. Final Confirmation & Handover to Execution
+                    logger.info(f"Maestro confirms entry for {symbol}. Handing over to execution engine.")
                     from okx_maestro import initiate_real_trade 
                     if await initiate_real_trade(candidate, self.bot_data.settings, self.exchange, self.application.bot):
                         await conn.execute("UPDATE trade_candidates SET status = 'executed' WHERE id = ?", (candidate['id'],))
                     else:
                         await conn.execute("UPDATE trade_candidates SET status = 'failed_execution' WHERE id = ?", (candidate['id'],))
                     await conn.commit()
-                    await asyncio.sleep(1) # Stagger executions
+                    await asyncio.sleep(1)
                 except Exception as e:
-                    logger.error(f"Wise Man: Error reviewing entry candidate for {symbol}: {e}", exc_info=True)
+                    logger.error(f"Maestro: Error reviewing entry candidate for {symbol}: {e}", exc_info=True)
                     await conn.execute("UPDATE trade_candidates SET status = 'error' WHERE id = ?", (candidate['id'],)); await conn.commit()
 
     # ==============================================================================
@@ -274,20 +331,20 @@ class WiseMan:
                     exit_threshold = last_ema
                     if is_negative_mood:
                         exit_threshold *= 0.998 # A tighter stop: exit even if price is only slightly below EMA
-                        logger.info(f"Wise Man: Negative market mood detected. Tightening SL for {symbol}.")
+                        logger.info(f"Maestro: Negative market mood detected. Tightening SL for {symbol}.")
                     
                     if current_price < exit_threshold:
-                        logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
+                        logger.warning(f"Maestro confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
                         await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
                     else:
-                        logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
+                        logger.info(f"Maestro cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
                         from okx_maestro import safe_send_message
                         message = f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\nقرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا."
                         await safe_send_message(self.application.bot, message)
                         await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
                         await conn.commit()
                 except Exception as e:
-                    logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
+                    logger.error(f"Maestro: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
                     await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
 
     # ==============================================================================
@@ -295,14 +352,19 @@ class WiseMan:
     # ==============================================================================
     async def review_active_trades_with_tactics(self, context: object = None):
         """
-        [النسخة المصححة] يراجع الصفقات النشطة لتمديد الأهداف وتأمين الأرباح بشكل متدرج عند اقتراب السعر من الهدف،
-        أو يقطع الخسائر استباقيًا للصفقات الضعيفة.
+        [V9.2] تم تعديل هذه الدالة لتخدم البروتوكول 2 فقط (الحارس الديناميكي).
         """
-        logger.info("🧠 Wise Man: Running tactical review (Intelligent Trailing & Proactive Exits)...")
+        logger.info("🧠 Maestro: Running tactical review for Protocol 2 trades...")
         async with self.bot_data.trade_management_lock:
             async with aiosqlite.connect(self.db_file) as conn:
                 conn.row_factory = aiosqlite.Row
-                active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+                # --- [V9.2] التعديل الحاسم: اختر فقط الصفقات التي تتبع البروتوكول 2 ---
+                protocol_2_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active' AND management_protocol = 2")).fetchall()
+
+                if not protocol_2_trades:
+                    logger.info("Maestro: No active Protocol 2 trades to review.")
+                    return
+
                 try:
                     # جلب بيانات البيتكوين مرة واحدة لتقليل طلبات API
                     async with self.request_semaphore:
@@ -312,7 +374,7 @@ class WiseMan:
                 except Exception:
                     btc_momentum_is_negative = False
 
-                for trade_data in active_trades:
+                for trade_data in protocol_2_trades:
                     trade = dict(trade_data)
                     symbol = trade['symbol']
                     try:
@@ -330,7 +392,7 @@ class WiseMan:
                         if minutes_since_open > 45:
                             df['ema_slow'] = ta.ema(df['close'], length=30)
                             if current_price < (df['ema_slow'].iloc[-1] * 0.995) and btc_momentum_is_negative and current_price < trade['entry_price']:
-                                logger.warning(f"Wise Man proactively detected SUSTAINED weakness in {symbol}. Requesting exit.")
+                                logger.warning(f"Maestro proactively detected SUSTAINED weakness in {symbol}. Requesting exit.")
                                 await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ?", (trade['id'],))
                                 await conn.commit()
                                 from okx_maestro import safe_send_message
@@ -371,17 +433,17 @@ class WiseMan:
                                     'new_sl': new_sl,
                                     'entry_price': trade['entry_price']
                                 }
-                                logger.info(f"Wise Man recommended TP extension to {new_tp} and SL to {new_sl} for trade #{trade['id']}")
+                                logger.info(f"Maestro recommended TP extension to {new_tp} and SL to {new_sl} for trade #{trade['id']}")
 
                         await asyncio.sleep(2) # فاصل بسيط بين معالجة كل صفقة
                     except Exception as e:
-                        logger.error(f"Wise Man: Error during tactical review for {symbol}: {e}", exc_info=True)
+                        logger.error(f"Maestro: Error during tactical review for {symbol}: {e}", exc_info=True)
     # ==============================================================================
     # --- ♟️ المدير الاستراتيجي (يعمل كل ساعة) ♟️ ---
     # ==============================================================================
     async def review_portfolio_risk(self, context: object = None):
         """يراجع مخاطر المحفظة (تركيز الأصول، القطاعات، والارتباط) ويرسل تنبيهات."""
-        logger.info("🧠 Wise Man: Starting portfolio risk review...")
+        logger.info("🧠 Maestro: Starting portfolio risk review...")
         alerts = []
         try:
             async with self.request_semaphore:
@@ -431,13 +493,13 @@ class WiseMan:
                 message_body = "\n- ".join(alerts)
                 message = f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n- {message_body}"
                 await safe_send_message(self.application.bot, message)
-                await self._send_email_alert("Wise Man: Portfolio Risk Warning", message.replace('`', '').replace('*', ''))
+                await self._send_email_alert("Maestro: Portfolio Risk Warning", message.replace('`', '').replace('*', ''))
 
         except Exception as e:
-            logger.error(f"Wise Man: Error during portfolio risk review: {e}", exc_info=True)
+            logger.error(f"Maestro: Error during portfolio risk review: {e}", exc_info=True)
             
     # ==============================================================================
-    # --- 🛠️ دوال مساعدة V2.0 🛠️ ---
+    # --- 🛠️ دوال مساعدة 🛠️ ---
     # ==============================================================================
     async def _get_correlation(self, symbol: str, df_symbol: pd.DataFrame = None) -> float:
         """يحسب الارتباط بين عملة و BTC، مع استخدام ذاكرة تخزين مؤقتة."""
@@ -457,7 +519,7 @@ class WiseMan:
             self.correlation_cache[symbol] = {'timestamp': now, 'value': correlation}
             return correlation
         except Exception as e:
-            logger.error(f"Wise Man: Could not calculate correlation for {symbol}: {e}")
+            logger.error(f"Maestro: Could not calculate correlation for {symbol}: {e}")
             return 0.5 # Return neutral value on error
 
     async def _send_email_alert(self, subject: str, body: str):
@@ -469,7 +531,7 @@ class WiseMan:
         recipient = os.getenv('RECIPIENT_EMAIL')
 
         if not all([smtp_user, smtp_pass, smtp_server, smtp_port, recipient]):
-            logger.warning("Wise Man: Email credentials not fully configured. Skipping email alert.")
+            logger.warning("Maestro: Email credentials not fully configured. Skipping email alert.")
             return
 
         msg = MIMEText(body)
@@ -482,6 +544,6 @@ class WiseMan:
                 server.starttls()
                 server.login(smtp_user, smtp_pass)
                 server.send_message(msg)
-            logger.info(f"Wise Man: Successfully sent email alert: '{subject}'")
+            logger.info(f"Maestro: Successfully sent email alert: '{subject}'")
         except Exception as e:
-            logger.error(f"Wise Man: Failed to send email alert: {e}", exc_info=True)
+            logger.error(f"Maestro: Failed to send email alert: {e}", exc_info=True)
