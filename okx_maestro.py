@@ -1483,13 +1483,20 @@ class TradeGuardian:
             except:
                 duration_str = "N/A"
 
+            # --- [✅ إصلاح V9.3] إصلاح منطق حساب كفاءة الخروج ---
             highest_price_reached = max(trade.get('highest_price', 0), close_price)
-            exit_efficiency = 0
-            if highest_price_reached > trade['entry_price']:
-                potential_pnl = (highest_price_reached - trade['entry_price']) * trade['quantity']
-                if potential_pnl > 0:
-                    exit_efficiency = (pnl / potential_pnl) * 100
-                    exit_efficiency = max(0, min(exit_efficiency, 100))
+            exit_efficiency = 0.0
+
+            # النطاق المحتمل هو الفرق بين أفضل خروج ممكن (أعلى سعر) وأسوأ خروج (وقف الخسارة)
+            potential_range = highest_price_reached - trade['stop_loss']
+            
+            # النطاق المحقق هو الفرق بين الخروج الفعلي وأسوأ خروج ممكن
+            achieved_range = close_price - trade['stop_loss']
+
+            if potential_range > 0:
+                efficiency = (achieved_range / potential_range) * 100
+                # حصر القيمة بين 0 و 100
+                exit_efficiency = max(0, min(efficiency, 100))
 
             emoji = "✅" if pnl >= 0 else "🛑"
             reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
