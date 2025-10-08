@@ -2402,13 +2402,20 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
     await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
 
     try:
+        async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    trade_id = int(query.data.split('_')[-1])
+
+    await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
+
+    try:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             trade = await (await conn.execute("SELECT * FROM trades WHERE id = ? AND status = 'active'", (trade_id,))).fetchone()
 
         if not trade:
             await query.answer("لم يتم العثور على الصفقة أو أنها ليست نشطة.", show_alert=True)
-            await show_trades_command(update, context)
+            await show_trades_command(update, context) # افترض وجود هذه الدالة لإعادة عرض الصفقات
             return
 
         trade = dict(trade)
@@ -2419,13 +2426,17 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
             return
             
         current_price = ticker['last']
-        await self._close_trade(trade, "إغلاق يدوي", current_price)
+        
+        # --- هذا هو السطر الذي تم تصحيحه ---
+        await bot_data.trade_guardian._close_trade(trade, "إغلاق يدوي", current_price)
+        
         await query.answer("✅ تم إرسال أمر البيع بنجاح!")
 
     except Exception as e:
         logger.error(f"Manual sell execution failed for trade #{trade_id}: {e}", exc_info=True)
         await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: {e}")
         await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
+
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
