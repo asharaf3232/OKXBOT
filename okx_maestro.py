@@ -1282,279 +1282,43 @@ class PublicWebSocketManager:
     async def run(self):
         await exponential_backoff_with_jitter(self._run_loop)
 
-# okx_maestro.py -> استبدل الكلاس الحالي بهذا الكود بالكامل
-
-class TradeGuardian:
-    def __init__(self, application):
-        self.application = application
-        # --- [✅ تعديل جديد] ---
-        # ذاكرة تخزين مؤقت لقيم ATR لتجنب استدعاءات API المفرطة
-        # {'symbol': {'value': 0.123, 'timestamp': 167...}}
-        self.atr_cache = {}
-
-    async def _get_atr(self, symbol: str) -> float | None:
-        """
-        [✅ دالة جديدة]
-        تجلب قيمة ATR للعملة مع استخدام ذاكرة تخزين مؤقتة.
-        """
-        now = time.time()
-        cache_duration = 180 # تحديث قيمة ATR كل 3 دقائق
-
-        if symbol in self.atr_cache and (now - self.atr_cache[symbol]['timestamp'] < cache_duration):
-            return self.atr_cache[symbol]['value']
-
-        try:
-            # استخدم safe_api_call لضمان الموثوقية
-            ohlcv = await safe_api_call(lambda: bot_data.exchange.fetch_ohlcv(symbol, '5m', limit=15))
-            if not ohlcv or len(ohlcv) < 14:
-                return self.atr_cache.get(symbol, {}).get('value') # إرجاع القيمة القديمة إذا فشل الجلب
-
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            atr_series = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            if atr_series is not None and not atr_series.empty:
-                current_atr = atr_series.iloc[-1]
-                if pd.notna(current_atr):
-                    self.atr_cache[symbol] = {'value': current_atr, 'timestamp': now}
-                    return current_atr
-            
-            return self.atr_cache.get(symbol, {}).get('value') # إرجاع القيمة القديمة عند الفشل
-
-        except Exception as e:
-            logger.warning(f"Guardian ATR calculation failed for {symbol}: {e}")
-            # في حالة الخطأ، أرجع آخر قيمة معروفة إن وجدت
-            return self.atr_cache.get(symbol, {}).get('value')
-
-
-    async def handle_ticker_update(self, ticker_data):
-        async with trade_management_lock:
-            symbol = ticker_data['instId'].replace('-', '/')
-            current_price = float(ticker_data['last'])
-            
-            if symbol not in bot_data.active_trades_cache:
-                return
-            
-            trade = bot_data.active_trades_cache[symbol].copy()
-            
-            # تجاهل أي تحديثات للصفقات التي ليست في حالة نشطة أو تمديد
-            if trade['status'] not in ['active', 'extending']:
-                return
-
-            try:
-                settings = bot_data.settings
-                
-                # --- [✅ الجوهرة: دمج منطق الرجل الحكيم للاستجابة الفورية] ---
-                profit_range = trade['take_profit'] - trade['entry_price']
-                if profit_range > 0:
-                    proximity_percent = settings.get('wise_man_proximity_percent', 0.95)
-                    trigger_price = trade['entry_price'] + (profit_range * proximity_percent)
-                    price_is_near_target = current_price >= trigger_price
-                else:
-                    price_is_near_target = False
-
-                if price_is_near_target and trade['status'] == 'active':
-                    bot_data.active_trades_cache[symbol]['status'] = 'extending' # تجميد فوري لمنع التعارض
-                    
-                    ohlcv = await safe_api_call(lambda: bot_data.exchange.fetch_ohlcv(symbol, '15m', limit=50))
-                    if ohlcv:
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        df.ta.rsi(length=14, append=True)
-                        adx_data = ta.adx(df['high'], df['low'], df['close'])
-                        current_rsi = df['RSI_14'].iloc[-1]
-                        current_adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None and not adx_data.empty else 0
-                        strong_adx_level = settings.get('wise_man_strong_adx_level', 30)
-
-                        anomaly_multiplier = settings.get('anomaly_candle_multiplier', 5.0)
-                        avg_candle_size = (df['high'] - df['low']).iloc[:-1].mean()
-                        last_candle_size = df['high'].iloc[-1] - df['low'].iloc[-1]
-                        is_anomaly_spike = last_candle_size > (avg_candle_size * anomaly_multiplier)
-
-                        if current_adx > strong_adx_level and current_rsi < 80 and not is_anomaly_spike:
-                            async with aiosqlite.connect(DB_FILE) as conn:
-                                previous_tp = trade['take_profit']
-                                new_tp = previous_tp * 1.05
-                                new_sl = trigger_price
-
-                                bot_data.active_trades_cache[symbol].update({'take_profit': new_tp, 'stop_loss': new_sl, 'status': 'active'})
-                                await conn.execute("UPDATE trades SET take_profit = ?, stop_loss = ?, status = 'active' WHERE id = ?", (new_tp, new_sl, trade['id']))
-                                await conn.commit()
-                                
-                                logger.info(f"TURBO-MODE: Trade #{trade['id']} TP extended to {new_tp:.4f}")
-                                from okx_maestro import safe_send_message
-                                await safe_send_message(self.application.bot, f"🚀 **محرك التيربو | #{trade['id']} {symbol}**\nتم رصد زخم فوري وتمديد الهدف!")
-                                trade = bot_data.active_trades_cache[symbol].copy() # تحديث بيانات الصفقة لمواصلة العمل
-                        else:
-                            logger.info(f"TURBO-MODE: TP Extension for #{trade['id']} denied. ADX:{current_adx:.1f}, RSI:{current_rsi:.1f}, Anomaly:{is_anomaly_spike}")
-                            bot_data.active_trades_cache[symbol]['status'] = 'active' # إعادة تفعيل الصفقة إذا لم يتم التمديد
-
-                # --- [نهاية دمج المنطق] ---
-
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    if current_price >= trade['take_profit']:
-                        await self._close_trade(trade, "ناجحة (TP)", current_price)
-                        return
-                    
-                    if current_price <= trade['stop_loss']:
-                        new_status = 'pending_profit_stop_confirmation' if trade['stop_loss'] > trade['entry_price'] else 'pending_exit_confirmation'
-                        bot_data.active_trades_cache[symbol]['status'] = new_status
-                        await conn.execute("UPDATE trades SET status = ? WHERE id = ? AND status = 'active'", (new_status, trade['id']))
-                        await conn.commit()
-                        logger.warning(f"Stop Loss hit for trade #{trade['id']}. Handing off to Wise Man for confirmation.")
-                        return
-
-                    highest_price_so_far = max(trade.get('highest_price', 0), current_price)
-                    if highest_price_so_far > trade.get('highest_price', 0):
-                        bot_data.active_trades_cache[symbol]['highest_price'] = highest_price_so_far
-                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price_so_far, trade['id']))
-                        trade['highest_price'] = highest_price_so_far # تحديث النسخة المحلية
-
-                        current_atr = await self._get_atr(symbol)
-                        if current_atr:
-                            atr_multiplier = settings.get('atr_trailing_multiplier', 2.5)
-                            new_sl_candidate = highest_price_so_far - (current_atr * atr_multiplier)
-                            
-                            if new_sl_candidate > trade['stop_loss']:
-                                bot_data.active_trades_cache[symbol]['stop_loss'] = new_sl_candidate
-                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
-
-                    await conn.commit()
-
-            except Exception as e:
-                logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
-                if symbol in bot_data.active_trades_cache: # إجراء وقائي
-                    bot_data.active_trades_cache[symbol]['status'] = 'active' # إعادة تفعيل الصفقة عند حدوث خطأ
-
-    async def _close_trade(self, trade, reason, close_price):
-        symbol, trade_id = trade['symbol'], trade['id']
-        bot = self.application.bot
-        log_ctx = {'trade_id': trade_id}
-
-        logger.info(f"Guardian: Initiating closure for trade #{trade_id} [{symbol}]. Reason: {reason}", extra=log_ctx)
-
-        try:
-            base_currency = symbol.split('/')[0]
-            balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
-            if not balance:
-                logger.error(f"Closure for #{trade_id} failed: Could not fetch balance.", extra=log_ctx)
-                return
-
-            available_quantity = balance.get(base_currency, {}).get('free', 0.0)
-
-            if available_quantity <= 0:
-                logger.warning(f"Closure for #{trade_id} skipped: No available balance for {base_currency}.", extra=log_ctx)
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (f"{reason} (No Balance)", close_price, 0.0, trade_id))
-                    await conn.commit()
-                await bot_data.public_ws.unsubscribe([symbol])
-                return
-
-            try:
-                market = bot_data.exchange.market(symbol)
-                if not market: raise Exception("Market data not found in cache")
-            except Exception as e:
-                logger.error(f"Closure for #{trade_id} failed: Could not get market data: {e}", extra=log_ctx)
-                return
-
-            min_amount = market.get('limits', {}).get('amount', {}).get('min')
-
-            if min_amount and available_quantity < min_amount:
-                logger.warning(f"Closure for #{trade_id} failed: Quantity {available_quantity} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
-                    await conn.commit()
-                await bot_data.public_ws.unsubscribe([symbol])
-                return
-
-            quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, available_quantity))
-
-            if min_amount and quantity_to_sell < min_amount:
-                logger.warning(f"Closure for #{trade_id} failed: Rounded quantity {quantity_to_sell} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
-                async with aiosqlite.connect(DB_FILE) as conn:
-                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
-                    await conn.commit()
-                await bot_data.public_ws.unsubscribe([symbol])
-                return
-
-            await safe_api_call(lambda: bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell))
-
-            pnl = (close_price - trade['entry_price']) * trade['quantity']
-            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
-                await conn.commit()
-
-            await bot_data.public_ws.unsubscribe([symbol])
-
-            try:
-                start_dt = datetime.fromisoformat(trade['timestamp'])
-                end_dt = datetime.now(EGYPT_TZ)
-                duration = end_dt - start_dt
-                days, rem = divmod(duration.total_seconds(), 86400)
-                hours, rem = divmod(rem, 3600)
-                minutes, _ = divmod(rem, 60)
-                if days > 0: duration_str = f"{int(days)} يوم و {int(hours)} ساعة"
-                elif hours > 0: duration_str = f"{int(hours)} ساعة و {int(minutes)} دقيقة"
-                else: duration_str = f"{int(minutes)} دقيقة"
-            except:
-                duration_str = "N/A"
-
-            highest_price_reached = max(trade.get('highest_price', 0), close_price)
-            exit_efficiency = 0
-            if highest_price_reached > trade['entry_price']:
-                potential_pnl = (highest_price_reached - trade['entry_price']) * trade['quantity']
-                if potential_pnl > 0:
-                    exit_efficiency = (pnl / potential_pnl) * 100
-                    exit_efficiency = max(0, min(exit_efficiency, 100))
-
-            emoji = "✅" if pnl >= 0 else "🛑"
-            reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
-            msg = (
-                f"{emoji} **ملف المهمة المكتملة**\n\n"
-                f"▫️ **العملة:** `{symbol}`\n"
-                f"▫️ **رقم الصفقة:** `{trade_id}`\n"
-                f"▫️ **الاستراتيجية:** `{reasons_ar}`\n"
-                f"▫️ **سبب الإغلاق:** `{reason}`\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"💰 **صافي الربح/الخسارة:** `${pnl:,.2f}` `({pnl_percent:+.2f}%)`\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"⏳ **مدة الصفقة:** `{duration_str}`\n"
-                f"📉 **متوسط سعر الدخول:** `${trade['entry_price']:,.4f}`\n"
-                f"📈 **متوسط سعر الخروج:** `${close_price:,.4f}`\n"
-                f"🔝 **أعلى سعر وصلت إليه:** `${highest_price_reached:,.4f}`\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"🧠 **كفاءة الخروج:** `{exit_efficiency:.2f}%`"
-            )
-            await safe_send_message(bot, msg)
-
-        except (ccxt.InvalidOrder, ccxt.InsufficientFunds) as e:
-            logger.warning(f"Closure for #{trade_id} failed due to exchange rules, moving to incubator: {e}", extra=log_ctx)
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = 'incubated' WHERE id = ?", (trade_id,))
-                await conn.commit()
-        except Exception as e:
-            logger.critical(f"CRITICAL: Final closure attempt for #{trade_id} failed unexpectedly: {e}", exc_info=True, extra=log_ctx)
-            async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
-                await conn.commit()
-            await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
-
-    async def sync_subscriptions(self):
-        try:
-            async with aiosqlite.connect(DB_FILE) as conn:
-                active_symbols = [row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()]
-            if active_symbols:
-                logger.info(f"Guardian: Syncing initial subscriptions: {active_symbols}")
-                await bot_data.public_ws.subscribe(active_symbols)
-        except Exception as e:
-            logger.error(f"Guardian Sync Error: {e}")
+# الملف: okx_maestro.py
+# ----------------------------------------------------
+# >>>>>>>> ابدأ النسخ من هنا <<<<<<<<
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("🕵️ Supervisor: Auditing pending trades and failed closures...")
+    logger.info("🕵️ Supervisor: Auditing system integrity...")
+    
+    # --- مهمة حارس المقبرة (Graveyard Shift) ---
+    try:
+        active_symbols_in_cache = list(bot_data.active_trades_cache.keys())
+        if active_symbols_in_cache:
+            tickers = await safe_api_call(lambda: bot_data.exchange.fetch_tickers(symbols=active_symbols_in_cache))
+            if tickers:
+                for symbol, trade_data in list(bot_data.active_trades_cache.items()):
+                    if symbol in tickers and trade_data.get('status') == 'active':
+                        current_price = tickers[symbol].get('last')
+                        stop_loss = trade_data.get('stop_loss')
+                        if current_price and stop_loss and current_price < stop_loss:
+                            logger.critical(f"🚨 SUPERVISOR OVERRIDE! Trade #{trade_data['id']} [{symbol}] is below SL but still active. Forcing closure!")
+                            await TradeGuardian(context.application)._close_trade(trade_data, "إغلاق طارئ (المشرف)", current_price)
+    except Exception as e:
+        logger.error(f"🚨 Supervisor Graveyard Shift failed: {e}", exc_info=True)
+    
+    # --- مراجعة الصفقات العالقة في قاعدة البيانات ---
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         
         two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
+        
+        # مراجعة الصفقات العالقة في حالة انتظار تأكيد الخروج
+        stuck_pending_exit = await (await conn.execute("SELECT * FROM trades WHERE status LIKE 'pending_%_confirmation' AND timestamp <= ?", (two_mins_ago,))).fetchall()
+        for trade_data in stuck_pending_exit:
+             trade = dict(trade_data)
+             logger.warning(f"🕵️ Supervisor: Found stuck pending exit trade #{trade['id']}. Forcing closure decision.")
+             await wise_man._review_pending_exits() # استدعاء الرجل الحكيم لاتخاذ قرار فوري
+
+        # مراجعة الصفقات العالقة في حالة الشراء
         stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
         for trade_data in stuck_trades:
             trade = dict(trade_data)
@@ -1567,25 +1331,100 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                     await activate_trade(order_id, symbol)
                 elif order_status['status'] in ['canceled', 'expired']:
                     await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
-                await conn.commit()
+                    await conn.commit()
             except ccxt.OrderNotFound:
                 await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
                 await conn.commit()
             except Exception as e:
                 logger.error(f"🕵️ Supervisor error processing stuck trade #{trade['id']}: {e}", extra={'trade_id': trade['id']})
 
+        # مراجعة الصفقات التي فشل إغلاقها
         failed_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'closure_failed' OR status = 'incubated'")).fetchall()
         for trade_data in failed_trades:
             trade = dict(trade_data)
             logger.warning(f"🚨 Supervisor: Found failed closure for trade #{trade['id']}. Retrying intervention.")
             try:
                 ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
-                if ticker:
-                    current_price = ticker.get('last')
-                    if current_price:
-                        await TradeGuardian(context.application)._close_trade(trade, "إغلاق إجباري (مشرف)", current_price)
+                if ticker and ticker.get('last'):
+                    await TradeGuardian(context.application)._close_trade(trade, "إغلاق إجباري (مشرف)", ticker['last'])
             except Exception as e:
                 logger.error(f"🚨 Supervisor failed to intervene for trade #{trade['id']}: {e}")
+
+# >>>>>>>> توقف عن النسخ هنا <<<<<<<<
+# ----------------------------------------------------
+
+
+# الملف: okx_maestro.py
+# ----------------------------------------------------
+# >>>>>>>> ابدأ النسخ من هنا <<<<<<<<
+
+async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🕵️ Supervisor: Auditing system integrity...")
+    
+    # --- مهمة حارس المقبرة (Graveyard Shift) ---
+    try:
+        active_symbols_in_cache = list(bot_data.active_trades_cache.keys())
+        if active_symbols_in_cache:
+            tickers = await safe_api_call(lambda: bot_data.exchange.fetch_tickers(symbols=active_symbols_in_cache))
+            if tickers:
+                for symbol, trade_data in list(bot_data.active_trades_cache.items()):
+                    if symbol in tickers and trade_data.get('status') == 'active':
+                        current_price = tickers[symbol].get('last')
+                        stop_loss = trade_data.get('stop_loss')
+                        if current_price and stop_loss and current_price < stop_loss:
+                            logger.critical(f"🚨 SUPERVISOR OVERRIDE! Trade #{trade_data['id']} [{symbol}] is below SL but still active. Forcing closure!")
+                            await TradeGuardian(context.application)._close_trade(trade_data, "إغلاق طارئ (المشرف)", current_price)
+    except Exception as e:
+        logger.error(f"🚨 Supervisor Graveyard Shift failed: {e}", exc_info=True)
+    
+    # --- مراجعة الصفقات العالقة في قاعدة البيانات ---
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        
+        two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
+        
+        # مراجعة الصفقات العالقة في حالة انتظار تأكيد الخروج
+        stuck_pending_exit = await (await conn.execute("SELECT * FROM trades WHERE status LIKE 'pending_%_confirmation' AND timestamp <= ?", (two_mins_ago,))).fetchall()
+        for trade_data in stuck_pending_exit:
+             trade = dict(trade_data)
+             logger.warning(f"🕵️ Supervisor: Found stuck pending exit trade #{trade['id']}. Forcing closure decision.")
+             await wise_man._review_pending_exits() # استدعاء الرجل الحكيم لاتخاذ قرار فوري
+
+        # مراجعة الصفقات العالقة في حالة الشراء
+        stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
+        for trade_data in stuck_trades:
+            trade = dict(trade_data)
+            order_id, symbol = trade['order_id'], trade['symbol']
+            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
+            try:
+                order_status = await safe_api_call(lambda: bot_data.exchange.fetch_order(order_id, symbol))
+                if not order_status: continue
+                if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
+                    await activate_trade(order_id, symbol)
+                elif order_status['status'] in ['canceled', 'expired']:
+                    await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
+                    await conn.commit()
+            except ccxt.OrderNotFound:
+                await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
+                await conn.commit()
+            except Exception as e:
+                logger.error(f"🕵️ Supervisor error processing stuck trade #{trade['id']}: {e}", extra={'trade_id': trade['id']})
+
+        # مراجعة الصفقات التي فشل إغلاقها
+        failed_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'closure_failed' OR status = 'incubated'")).fetchall()
+        for trade_data in failed_trades:
+            trade = dict(trade_data)
+            logger.warning(f"🚨 Supervisor: Found failed closure for trade #{trade['id']}. Retrying intervention.")
+            try:
+                ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
+                if ticker and ticker.get('last'):
+                    await TradeGuardian(context.application)._close_trade(trade, "إغلاق إجباري (مشرف)", ticker['last'])
+            except Exception as e:
+                logger.error(f"🚨 Supervisor failed to intervene for trade #{trade['id']}: {e}")
+
+# >>>>>>>> توقف عن النسخ هنا <<<<<<<<
+# ----------------------------------------------------
+
 
 # --- واجهة تليجرام ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
