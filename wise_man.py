@@ -59,24 +59,20 @@ SECTOR_MAP = {
 }
 
 class WiseMan:
-    def __init__(self, exchange: ccxt.Exchange, application: Application, bot_data_ref: object, db_file: str):
-        self.exchange = exchange
-        self.application = application
-        self.bot_data = bot_data_ref
-        self.db_file = db_file
-        self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
-        
-        # --- [تعديل V2.0] تهيئة مكونات تعلم الآلة وإدارة المخاطر ---
-        self.ml_model = LogisticRegression() if SKLEARN_AVAILABLE else None
-        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
-        self.model_trained = False
-        self.historical_features = deque(maxlen=200) # Buffer for potential future live training
-        
-        self.correlation_cache = {} # Cache for BTC correlation
-        self.request_semaphore = asyncio.Semaphore(3) # Rate limiting for Wise Man's own API calls
-        self.entry_event = asyncio.Event() # Event for signaling purposes
-        
-        logger.info("🧠 Wise Man module upgraded to V2.0 'ML Guardian & Maestro' model.")
+   def __init__(self, exchange: ccxt.Exchange, application: Application, bot_data_ref: object, db_file: str, command_queue):
+    self.exchange = exchange
+    self.application = application
+    self.bot_data = bot_data_ref
+    self.db_file = db_file
+    self.command_queue = command_queue
+    self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
+    self.ml_model = LogisticRegression() if SKLEARN_AVAILABLE else None
+    self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
+    self.model_trained = False
+    self.correlation_cache = {}
+    self.request_semaphore = asyncio.Semaphore(3)
+    logger.info("🧠 Wise Man v3.1 (Strategic Commander) Initialized.")
+
 
     # ==============================================================================
     # --- 🧠 محرك تعلم الآلة (يعمل أسبوعيًا) 🧠 ---
@@ -282,68 +278,67 @@ class WiseMan:
                 except Exception as e:
                     logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
                     await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
+                    
 
-        # ==============================================================================
-    # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
-    # ==============================================================================
-    # الملف: wise_man.py
-# استبدل الدالة التالية بالكامل
-
+    async def intelligent_reviewer_job(self, context: object = None):
+        logger.info("🧠 Intelligent Reviewer: Reviewing active trades for signal validity...")
+        async with aiosqlite.connect(self.db_file) as conn:
+            conn.row_factory = aiosqlite.Row
+            active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+        
+        from okx_maestro import SCANNERS, TIMEFRAME, safe_api_call # استيراد محلي لتجنب المشاكل
+        
+        for trade_data in active_trades:
+            trade = dict(trade_data)
+            symbol, primary_reason = trade['symbol'], trade['reason'].split(' (')[0].split(' + ')[0].strip()
+            if primary_reason not in SCANNERS: continue
+            try:
+                ohlcv = await safe_api_call(lambda: self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220))
+                if not ohlcv or len(ohlcv) < 50: continue
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                analyzer_func, params = SCANNERS[primary_reason], self.bot_data.settings.get(primary_reason, {})
+                func_args = {'df': df.copy(), 'params': params, 'rvol': 0, 'adx_value': 0}
+                if primary_reason in ['support_rebound']: func_args.update({'exchange': self.exchange, 'symbol': symbol})
+                
+                result = await analyzer_func(**func_args) if asyncio.iscoroutinefunction(analyzer_func) else analyzer_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
+                
+                if not result:
+                    logger.warning(f"Intelligent Reviewer: Signal '{primary_reason}' for trade #{trade['id']} is now INVALID. Closing trade.")
+                    current_price = df['close'].iloc[-1]
+                    # نستدعي دالة الإغلاق مباشرة من الحارس
+                    await self.bot_data.trade_guardian._close_trade(trade, f"إغلاق (إشارة لم تعد صالحة)", current_price)
+            except Exception as e:
+                logger.error(f"Intelligent Reviewer failed for {symbol}: {e}", exc_info=True)
+    
     # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
     # ==============================================================================
     async def review_active_trades_with_tactics(self, context: object = None):
-        """
-        [النسخة المحدثة] هذه الدالة الآن مسؤولة فقط عن التحليلات التكتيكية البطيئة،
-        مثل كشف الضعف المستمر في الصفقات التي استمرت لفترة طويلة.
-        تم نقل منطق تمديد الهدف إلى TradeGuardian للاستجابة الفورية.
-        """
-        logger.info("🧠 Wise Man: Running slow tactical review (Sustained Weakness Check)...")
+        logger.info("🧠 Wise Man: Running STRATEGIC review... issuing tactical commands.")
         async with aiosqlite.connect(self.db_file) as conn:
             conn.row_factory = aiosqlite.Row
             active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+        
+        from okx_maestro import safe_api_call # استيراد محلي لتجنب المشاكل
+
+        for trade_data in active_trades:
+            trade = dict(trade_data)
+            symbol = trade['symbol']
             try:
-                async with self.request_semaphore:
-                    btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=20)
-                btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                btc_momentum_is_negative = ta.mom(btc_df['close'], length=10).iloc[-1] < 0
-            except Exception:
-                btc_momentum_is_negative = False
-
-            for trade_data in active_trades:
-                trade = dict(trade_data)
-                symbol = trade['symbol']
-                try:
-                    # منطق الخروج الاستباقي للضعف المستمر (يبقى كما هو)
-                    trade_open_time = datetime.fromisoformat(trade['timestamp'])
-                    minutes_since_open = (datetime.now(timezone.utc).astimezone(trade_open_time.tzinfo) - trade_open_time).total_seconds() / 60
-                    
-                    if minutes_since_open > 45:
-                        async with self.request_semaphore:
-                            ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
-                        if not ohlcv:
-                            continue
-                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                        current_price = df['close'].iloc[-1]
-                        
-                        df['ema_slow'] = ta.ema(df['close'], length=30)
-                        if current_price < (df['ema_slow'].iloc[-1] * 0.995) and btc_momentum_is_negative and current_price < trade['entry_price']:
-                            logger.warning(f"Wise Man proactively detected SUSTAINED weakness in {symbol}. Requesting exit.")
-                            await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ?", (trade['id'],))
-                            await conn.commit()
-                            
-                            # تحديث الذاكرة
-                            if symbol in self.bot_data.active_trades_cache:
-                                self.bot_data.active_trades_cache[symbol]['status'] = 'pending_exit_confirmation'
-
-                            from okx_maestro import safe_send_message
-                            await safe_send_message(self.application.bot, f"🧠 **إنذار ضعف! | #{trade['id']} {symbol}**\nرصد الرجل الحكيم ضعفًا مستمرًا، جاري مراجعة الخروج.")
-                            continue
-                    
-                    await asyncio.sleep(2)
-                except Exception as e:
-                    logger.error(f"Wise Man: Error during tactical review for {symbol}: {e}", exc_info=True)
-
+                ohlcv = await safe_api_call(lambda: self.exchange.fetch_ohlcv(symbol, '1h', limit=50))
+                if not ohlcv: continue
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df.ta.macd(append=True)
+                macd_col, macds_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_")
+                if macd_col and macds_col and df[macd_col].iloc[-1] < df[macds_col].iloc[-1]:
+                    logger.info(f"WiseMan detected weakening 1h momentum for {symbol}. Issuing DEFENSIVE command.")
+                    await self.command_queue.put({'task': 'UPDATE_TACTICS', 'symbol': symbol, 'state': 'DEFENSIVE', 'params': {'callback_pct': 0.8}})
+                elif macd_col and macds_col and df[macd_col].iloc[-1] > df[macds_col].iloc[-2]:
+                    logger.info(f"WiseMan detected strong 1h momentum for {symbol}. Issuing AGGRESSIVE command.")
+                    await self.command_queue.put({'task': 'UPDATE_TACTICS', 'symbol': symbol, 'state': 'AGGRESSIVE', 'params': {'callback_pct': 2.5}})
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Wise Man tactical review failed for {symbol}: {e}")
     # ==============================================================================
     # --- ♟️ المدير الاستراتيجي (يعمل كل ساعة) ♟️ ---
     # ==============================================================================
