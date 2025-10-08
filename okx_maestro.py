@@ -292,8 +292,8 @@ async def init_database():
     try:
         logger.info("Starting DB init...")
         async with aiosqlite.connect(DB_FILE) as conn:
-            # --- [تعديل V8.1] إضافة أعمدة جديدة لجدول الصفقات
-            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0, trade_weight REAL DEFAULT 1.0, win_prob REAL DEFAULT 0.5, trade_size REAL DEFAULT 15.0)')
+            # --- [تعديل V9.2] إضافة أعمدة البروتوكول الجديدة لجدول الصفقات
+            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, close_retries INTEGER DEFAULT 0, last_profit_notification_price REAL DEFAULT 0, trade_weight REAL DEFAULT 1.0, win_prob REAL DEFAULT 0.5, trade_size REAL DEFAULT 15.0, management_protocol INTEGER NOT NULL DEFAULT 1, protocol_score INTEGER, highest_price_timestamp REAL)')
             # --- [تعديل V8.1] إضافة أعمدة جديدة لجدول المرشحين
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS trade_candidates (
@@ -324,6 +324,10 @@ async def init_database():
             # --- [تعديل V8.1] إضافة الأعمدة الجديدة إذا كانت مفقودة
             if 'win_prob' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN win_prob REAL DEFAULT 0.5"); added_columns.append('win_prob')
             if 'trade_size' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN trade_size REAL DEFAULT 15.0"); added_columns.append('trade_size')
+            # --- [تعديل V9.2] إضافة أعمدة البروتوكول إذا كانت مفقودة
+            if 'management_protocol' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN management_protocol INTEGER NOT NULL DEFAULT 1"); added_columns.append('management_protocol')
+            if 'protocol_score' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN protocol_score INTEGER"); added_columns.append('protocol_score')
+            if 'highest_price_timestamp' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN highest_price_timestamp REAL"); added_columns.append('highest_price_timestamp')
             await conn.commit()
             if added_columns:
                 logger.info(f"Added missing columns to trades table: {', '.join(added_columns)}")
@@ -334,14 +338,14 @@ async def init_database():
 
 async def log_pending_trade_to_db(signal, buy_order):
     """
-    [النسخة المصححة V8.2] - تسجل الصفقة المعلقة في قاعدة البيانات مع جميع بيانات الذكاء الاصطناعي.
+    [النسخة المصححة V9.2] - تسجل الصفقة المعلقة في قاعدة البيانات مع جميع بيانات الذكاء الاصطناعي والبروتوكول.
     """
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            # --- [الإصلاح الحاسم] إضافة الأعمدة المفقودة win_prob و trade_size ---
+            # --- [الإصلاح الحاسم] إضافة الأعمدة المفقودة win_prob و trade_size وبروتوكول ---
             await conn.execute("""
-                INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight, win_prob, trade_size)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight, win_prob, trade_size, management_protocol, protocol_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (datetime.now(EGYPT_TZ).isoformat(), 
                   signal['symbol'], 
                   signal['reason'], 
@@ -352,8 +356,10 @@ async def log_pending_trade_to_db(signal, buy_order):
                   signal['stop_loss'], 
                   signal.get('strength', 1), 
                   signal.get('weight', 1.0),
-                  signal.get('win_prob', 0.5), # <-- تم إضافة هذا الحقل
-                  signal.get('trade_size') # <-- تم إضافة هذا الحقل وتصحيح منطقه
+                  signal.get('win_prob', 0.5),
+                  signal.get('trade_size'),
+                  signal.get('management_protocol', 1),
+                  signal.get('protocol_score', 0)
                  ))
             await conn.commit()
             logger.info(f"Logged pending trade for {signal['symbol']} with order ID {buy_order['id']}.")
@@ -1024,8 +1030,8 @@ async def has_active_trade_for_symbol(symbol: str) -> bool:
 
 async def initiate_real_trade(signal, settings, exchange, bot):
     """
-    [النسخة النهائية المطورة V8.3]
-    - تفتح صفقة حقيقية مع نظام إشعارات متكامل وتطبيق شامل لـ safe_api_call.
+    [النسخة النهائية المطورة V9.2]
+    - تفتح صفقة حقيقية مع نظام إشعارات متكامل وتطبيق شامل لـ safe_api_call، وتدعم البروتوكول الجديد.
     """
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active.")
@@ -1287,9 +1293,11 @@ class PublicWebSocketManager:
     async def run(self):
         await exponential_backoff_with_jitter(self._run_loop)
 
+# --- [تعديل V9.2] إعادة هيكلة TradeGuardian لدعم البروتوكولات الثلاثة ---
 class TradeGuardian:
     def __init__(self, application):
         self.application = application
+        self.protocol_3_states = {}  # [V9.2] حالة الصفقات للبروتوكول 3 (شموع 1m في الذاكرة)
 
     async def handle_ticker_update(self, ticker_data):
         async with bot_data.trade_management_lock:
@@ -1305,109 +1313,247 @@ class TradeGuardian:
                         return
 
                     trade = dict(trade)
-                    settings = bot_data.settings
+                    protocol_id = trade.get('management_protocol', 1)
 
-                    # Check for Wise Man's recommendation
-                    if trade['id'] in bot_data.trade_update_recommendations:
-                        recommendation = bot_data.trade_update_recommendations.pop(trade['id'])
-                        new_tp = recommendation['new_tp']
-                        new_sl = recommendation['new_sl']
-                        entry_price = recommendation['entry_price']
-
-                        await conn.execute(
-                            "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
-                            (new_tp, new_sl, trade['id'],)
-                        )
-                        await conn.commit()
-                        
-                        logger.info(f"TradeGuardian applied Wise Man's recommendation for trade #{trade['id']}. New TP: {new_tp}, New SL: {new_sl}")
-                        
-                        locked_in_profit_pct = (new_sl / entry_price - 1) * 100 if entry_price > 0 else 0
-                        await safe_send_message(
-                            self.application.bot,
-                            f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
-                            f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
-                            f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
-                            f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
-                        )
-                        # We should re-fetch the trade to have the updated values
-                        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
-                        trade = dict(trade)
-
-                    # التحقق من الأهداف الأساسية أولاً
-                    if current_price >= trade['take_profit']:
-                        await self._close_trade(trade, "ناجحة (TP)", current_price)
-                        return
-                    
-                    if current_price <= trade['stop_loss']:
-                        logger.warning(f"Trade #{trade['id']} for {trade['symbol']} hit its Stop Loss. Handing off to Wise Man for final confirmation.")
-                        await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
-                        await conn.commit()
-                        return
-
-                    # --- [✅ الإصلاح الحاسم لمشكلة تتبع أعلى سعر] ---
+                    # --- [V9.2] تحديث أعلى سعر (مشترك لجميع البروتوكولات) ---
                     highest_price = max(trade.get('highest_price', 0), current_price)
                     if highest_price > trade.get('highest_price', 0):
-                        # 1. نقوم بتحديث وحفظ أعلى سعر فورًا وبشكل مستقل لضمان عدم ضياعه
-                        await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+                        await conn.execute("UPDATE trades SET highest_price = ?, highest_price_timestamp = ? WHERE id = ?", (highest_price, time.time(), trade['id']))
                         await conn.commit()
-                        
-                        # 2. نعيد تحميل بيانات الصفقة لضمان أن المتغير المحلي trade محدّث بآخر قيمة
                         trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
                         trade = dict(trade)
-                    # --- [نهاية الإصلاح] ---
 
-                    # الآن نكمل باقي المنطق مع بيانات دقيقة ومحفوظة
-                    if settings.get('trailing_sl_enabled', True):
-                        if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
-                            new_sl = trade['entry_price'] * 1.001
-                            if new_sl > trade['stop_loss']:
-                                await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                                # لا حاجة لـ conn.commit() هنا، سيتم في نهاية الدالة
-                                await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
-                        
-                        # نعيد قراءة الصفقة للتأكد من حالة trailing_sl_active المحدثة
-                        trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
-                        if trade_after_activation and trade_after_activation['trailing_sl_active']:
-                            # نستخدم أعلى سعر من الصفقة المحدثة لضمان الدقة
-                            new_sl_candidate = trade_after_activation['highest_price'] * (1 - settings['trailing_sl_callback_percent'] / 100)
-                            if new_sl_candidate > trade_after_activation['stop_loss']:
-                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                    # --- [V9.2] تحديث حالة البروتوكول 3 إذا لزم الأمر ---
+                    if protocol_id == 3:
+                        trade_id = trade['id']
+                        if trade_id not in self.protocol_3_states:
+                            self.protocol_3_states[trade_id] = {'candles': deque(maxlen=60), 'last_minute': None, 'last_price': 0}
+                        state = self.protocol_3_states[trade_id]
+                        await self._update_1m_candle_state(state, ticker_data)
 
-                    if settings.get('incremental_notifications_enabled', True):
-                        last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
-                        increment_percent = settings.get('incremental_notification_percent', 2.0)
-                        next_notification_target = last_notified_price * (1 + increment_percent / 100)
-                        
-                        if current_price >= next_notification_target:
-                            final_notified_price = last_notified_price
-                            while current_price >= next_notification_target:
-                                final_notified_price = next_notification_target
-                                next_notification_target = final_notified_price * (1 + increment_percent / 100)
-                            
-                            profit_percent = ((current_price / trade['entry_price']) - 1) * 100 if trade['entry_price'] > 0 else 0
-                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
-                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
-
-                    if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
-                        drawdown_pct = ((current_price / trade.get('highest_price')) - 1) * 100
-                        trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
-                        if drawdown_pct < trigger_pct:
-                            cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
-                            last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
-                            if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
-                                bot_data.last_deep_analysis_time[trade['id']] = time.time()
-                    
-                    await conn.commit()
+                    # --- [V9.2] توجيه إلى البروتوكول المناسب ---
+                    if protocol_id == 1:
+                        await self._execute_classic_protocol(trade, current_price)
+                    elif protocol_id == 2:
+                        await self._execute_dynamic_protocol(trade, current_price)
+                    elif protocol_id == 3:
+                        await self._execute_reflex_protocol(trade, ticker_data)
+                    else:
+                        logger.warning(f"Unknown protocol {protocol_id} for trade {trade['id']}. Falling back to classic.")
 
             except Exception as e:
                 logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+
+    async def _update_1m_candle_state(self, state, ticker_data):
+        """[V9.2] تحديث شمعة 1m في الذاكرة للبروتوكول 3 باستخدام بيانات التيكر."""
+        ts = int(ticker_data['ts'])
+        current_minute = ts // 60000
+        last = float(ticker_data['last'])
+        last_sz = float(ticker_data.get('lastSz', 0))
+
+        if state['last_minute'] is None or current_minute != state['last_minute']:
+            if state['last_minute'] is not None:
+                # إغلاق الشمعة السابقة
+                if state['candles']:
+                    prev = state['candles'][-1]
+                    prev['close'] = state['last_price']
+                    prev['volume'] += prev.get('partial_vol', 0)
+                    del prev['partial_vol']
+            # بدء شمعة جديدة
+            new_candle = {
+                'timestamp': ts,
+                'open': last,
+                'high': last,
+                'low': last,
+                'close': 0,
+                'volume': 0,
+                'partial_vol': last_sz
+            }
+            state['candles'].append(new_candle)
+            state['last_minute'] = current_minute
+        else:
+            # تحديث الشمعة الحالية
+            current = state['candles'][-1]
+            current['high'] = max(current['high'], last)
+            current['low'] = min(current['low'], last)
+            current['partial_vol'] += last_sz
+        state['last_price'] = last
+
+    async def _execute_classic_protocol(self, trade: dict, current_price: float):
+        """[V9.2] بروتوكول 1: إدارة كلاسيكية بسيطة (TP/SL فقط)."""
+        symbol = trade['symbol']
+        protocol_id = 1
+        if current_price >= trade['take_profit']:
+            reason = "ناجحة (TP)"
+            logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+            await self._close_trade(trade, reason, current_price)
+        elif current_price <= trade['stop_loss']:
+            reason = "فاشلة (SL)"
+            logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+            await self._close_trade(trade, reason, current_price)
+
+    async def _execute_dynamic_protocol(self, trade: dict, current_price: float):
+        """[V9.2] بروتوكول 2: الإدارة الديناميكية الكاملة (منطق V8.1 الأصلي + توصيات WiseMan)."""
+        symbol = trade['symbol']
+        protocol_id = 2
+        settings = bot_data.settings
+
+        # --- تطبيق توصيات WiseMan ---
+        if trade['id'] in bot_data.trade_update_recommendations:
+            recommendation = bot_data.trade_update_recommendations.pop(trade['id'])
+            new_tp = recommendation['new_tp']
+            new_sl = recommendation['new_sl']
+            entry_price = recommendation['entry_price']
+
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute(
+                    "UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?",
+                    (new_tp, new_sl, trade['id'],)
+                )
+                await conn.commit()
+            locked_in_profit_pct = (new_sl / entry_price - 1) * 100 if entry_price > 0 else 0
+            await safe_send_message(
+                self.application.bot,
+                f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
+                f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
+                f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
+                f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)"
+            )
+            # إعادة تحميل الصفقة
+            async with aiosqlite.connect(DB_FILE) as conn:
+                conn.row_factory = aiosqlite.Row
+                trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                trade = dict(trade)
+
+        # التحقق من الأهداف الأساسية أولاً
+        if current_price >= trade['take_profit']:
+            reason = "ناجحة (TP)"
+            logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+            await self._close_trade(trade, reason, current_price)
+            return
+        
+        if current_price <= trade['stop_loss']:
+            logger.warning(f"Trade #{trade['id']} for {trade['symbol']} hit its Stop Loss. Handing off to Wise Man for final confirmation.")
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ? AND status = 'active'", (trade['id'],))
+                await conn.commit()
+            return
+
+        # --- المنطق الديناميكي (trailing SL, notifications, wise_guardian) ---
+        if settings.get('trailing_sl_enabled', True):
+            if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                new_sl = trade['entry_price'] * 1.001
+                if new_sl > trade['stop_loss']:
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                        await conn.commit()
+                    await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
+                    # إعادة تحميل
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        conn.row_factory = aiosqlite.Row
+                        trade = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
+                        trade = dict(trade)
+            
+            if trade.get('trailing_sl_active', False):
+                new_sl_candidate = trade['highest_price'] * (1 - settings['trailing_sl_callback_percent'] / 100)
+                if new_sl_candidate > trade['stop_loss']:
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                        await conn.commit()
+
+        if settings.get('incremental_notifications_enabled', True):
+            last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
+            increment_percent = settings.get('incremental_notification_percent', 2.0)
+            next_notification_target = last_notified_price * (1 + increment_percent / 100)
+            
+            if current_price >= next_notification_target:
+                final_notified_price = last_notified_price
+                while current_price >= next_notification_target:
+                    final_notified_price = next_notification_target
+                    next_notification_target = final_notified_price * (1 + increment_percent / 100)
+                
+                profit_percent = ((current_price / trade['entry_price']) - 1) * 100 if trade['entry_price'] > 0 else 0
+                await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
+                    await conn.commit()
+
+        if settings.get('wise_guardian_enabled', True) and trade.get('highest_price', 0) > 0:
+            drawdown_pct = ((current_price / trade.get('highest_price')) - 1) * 100
+            trigger_pct = settings.get('wise_guardian_trigger_pct', -1.5)
+            if drawdown_pct < trigger_pct:
+                cooldown_minutes = settings.get('wise_guardian_cooldown_minutes', 15)
+                last_analysis_time = bot_data.last_deep_analysis_time.get(trade['id'], 0)
+                if (time.time() - last_analysis_time) > (cooldown_minutes * 60):
+                    bot_data.last_deep_analysis_time[trade['id']] = time.time()
+
+    async def _execute_reflex_protocol(self, trade: dict, ticker_data: dict):
+        """[V9.2] بروتوكول 3: إدارة رد الفعل عالية التردد مع شروط خروج إضافية."""
+        symbol = trade['symbol']
+        protocol_id = 3
+        current_price = float(ticker_data['last'])
+        state = self.protocol_3_states.get(trade['id'], {})
+
+        # التحقق من الأهداف الأساسية أولاً
+        if current_price >= trade['take_profit']:
+            reason = "ناجحة (TP)"
+            logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+            await self._close_trade(trade, reason, current_price)
+            return
+        
+        if current_price <= trade['stop_loss']:
+            reason = "فاشلة (SL)"
+            logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+            await self._close_trade(trade, reason, current_price)
+            return
+
+        # --- [V9.2] شروط الخروج الإضافية عالية التردد ---
+        # 1. Peak Drawdown
+        if trade.get('highest_price', 0) > 0 and current_price <= trade['highest_price'] * 0.985:
+            reason = "Peak Drawdown"
+            logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+            await self._close_trade(trade, f"فاشلة ({reason})", current_price)
+            return
+
+        # 2. Momentum Weakness & Support Breakdown (تحليل على شموع 1m)
+        if len(state.get('candles', [])) >= 14:  # كافي لـ RSI
+            df = pd.DataFrame(list(state['candles']))
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = df.set_index('timestamp').sort_index()
+            df.ta.rsi(length=14, append=True)
+            rsi_col = find_col(df.columns, "RSI_14")
+
+            if rsi_col and not df[rsi_col].isnull().all():
+                # RSI Divergence (bearish: price lower low, RSI higher low)
+                if len(df) >= 2:
+                    p_low1 = df['low'].iloc[-2]
+                    p_low2 = df['low'].iloc[-1]
+                    r_low1 = df[rsi_col].iloc[-2]
+                    r_low2 = df[rsi_col].iloc[-1]
+                    divergence = (p_low2 < p_low1) and (r_low2 > r_low1)
+                    if divergence:
+                        reason = "RSI Divergence"
+                        logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+                        await self._close_trade(trade, f"فاشلة ({reason})", current_price)
+                        return
+
+                # Price Breaking Last Low
+                if current_price < df['low'].iloc[-2]:
+                    reason = "Support Breakdown"
+                    logger.info(f"Protocol {protocol_id} triggered exit for {symbol}. Reason: {reason}.")
+                    await self._close_trade(trade, f"فاشلة ({reason})", current_price)
+                    return
+
     async def _close_trade(self, trade, reason, close_price):
         symbol, trade_id = trade['symbol'], trade['id']
         bot = self.application.bot
         log_ctx = {'trade_id': trade_id}
 
         logger.info(f"Guardian: Initiating closure for trade #{trade_id} [{symbol}]. Reason: {reason}", extra=log_ctx)
+
+        # --- [V9.2] تنظيف حالة البروتوكول 3 ---
+        if trade_id in self.protocol_3_states:
+            del self.protocol_3_states[trade_id]
 
         try:
             base_currency = symbol.split('/')[0]
@@ -2273,7 +2419,7 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
             return
             
         current_price = ticker['last']
-        await bot_data.trade_guardian._close_trade(trade, "إغلاق يدوي", current_price)
+        await self._close_trade(trade, "إغلاق يدوي", current_price)
         await query.answer("✅ تم إرسال أمر البيع بنجاح!")
 
     except Exception as e:
