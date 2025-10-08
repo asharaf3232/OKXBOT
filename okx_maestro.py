@@ -244,12 +244,13 @@ class BotState:
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
         self.last_deep_analysis_time = defaultdict(float)
+        self.trade_management_lock = asyncio.Lock()
 
 bot_data = BotState()
 wise_man = None
 smart_brain = None
 scan_lock = asyncio.Lock()
-trade_management_lock = asyncio.Lock()
+
 
 # --- وظائف مساعدة وقاعدة البيانات ---
 def load_settings():
@@ -1285,7 +1286,7 @@ class TradeGuardian:
         self.application = application
 
     async def handle_ticker_update(self, ticker_data):
-        async with trade_management_lock:
+        async with bot_data.trade_management_lock:
             symbol = ticker_data['instId'].replace('-', '/')
             current_price = float(ticker_data['last'])
             
