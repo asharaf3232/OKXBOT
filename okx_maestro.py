@@ -2402,7 +2402,7 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
     await safe_edit_message(query, "⏳ جاري إرسال أمر البيع...", reply_markup=None)
 
     try:
-        async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     trade_id = int(query.data.split('_')[-1])
 
