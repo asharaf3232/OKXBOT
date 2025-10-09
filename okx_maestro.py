@@ -232,6 +232,16 @@ SETTINGS_PRESETS = {
         "min_win_probability": 0.45,
     }
 }
+def format_price(price):
+    if price is None: return "N/A"
+    if price < 0.01 and price > 0: return f"{price:,.8g}"
+    return f"{price:,.4f}"
+
+def generate_tradingview_link(symbol: str, exchange: str = "OKX") -> str:
+    tv_symbol = symbol.replace('/', '')
+    return f"https://www.tradingview.com/chart/?symbol={exchange.upper()}:{tv_symbol.upper()}"
+
+
 # --- الحالة العامة للبوت ---
 class BotState:
     def __init__(self):
@@ -251,6 +261,7 @@ class BotState:
         self.last_deep_analysis_time = defaultdict(float)
         self.trade_management_lock = asyncio.Lock()
         self.trade_update_recommendations = {}
+        self.news_cache = {}
 
 bot_data = BotState()
 wise_man = None
@@ -1313,6 +1324,11 @@ class TradeGuardian:
                         return
 
                     trade = dict(trade)
+
+                    if trade.get('status') == 'force_exit_thesis_invalid':
+                        await self._close_trade(trade, "فاشلة (بطلان الفرضية)", current_price)
+                        return
+
                     protocol_id = trade.get('management_protocol', 1)
 
                     # --- [V9.2] تحديث أعلى سعر (مشترك لجميع البروتوكولات) ---
@@ -1656,9 +1672,9 @@ class TradeGuardian:
                 f"💰 **صافي الربح/الخسارة:** `${pnl:,.2f}` `({pnl_percent:+.2f}%)`\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"⏳ **مدة الصفقة:** `{duration_str}`\n"
-                f"📉 **متوسط سعر الدخول:** `${trade['entry_price']:,.4f}`\n"
-                f"📈 **متوسط سعر الخروج:** `${close_price:,.4f}`\n"
-                f"🔝 **أعلى سعر وصلت إليه:** `${highest_price_reached:,.4f}`\n"
+                f"📉 **متوسط سعر الدخول:** `${format_price(trade['entry_price'])}`\n"
+                f"📈 **متوسط سعر الخروج:** `${format_price(close_price)}`\n"
+                f"🔝 **أعلى سعر وصلت إليه:** `${format_price(highest_price_reached)}`\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🧠 **كفاءة الخروج:** `{exit_efficiency:.2f}%`"
             )
@@ -1933,14 +1949,26 @@ async def toggle_kill_switch(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def show_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DB_FILE) as conn:
-        conn.row_factory = aiosqlite.Row; trades = await (await conn.execute("SELECT id, symbol, status FROM trades WHERE status = 'active' OR status = 'pending' ORDER BY id DESC")).fetchall()
+        conn.row_factory = aiosqlite.Row
+        trades = await (await conn.execute("SELECT id, symbol, status FROM trades WHERE status = 'active' OR status = 'pending' ORDER BY id DESC")).fetchall()
     if not trades:
         text = "لا توجد صفقات نشطة حاليًا."
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
-        await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard)); return
-    text = "📈 *الصفقات النشطة*\nاختر صفقة لعرض تفاصيلها:\n"; keyboard = []
-    for trade in trades: status_emoji = "✅" if trade['status'] == 'active' else "⏳"; button_text = f"#{trade['id']} {status_emoji} | {trade['symbol']}"; keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{trade['id']}")])
-    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="db_trades")]); keyboard.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]); await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    text = "📈 *الصفقات النشطة*\nاختر صفقة لعرض تفاصيلها:\n"
+    keyboard = []
+    for trade in trades:
+        status_emoji = "✅" if trade['status'] == 'active' else "⏳"
+        base_currency = trade['symbol'].split('/')[0]
+        details_button = InlineKeyboardButton(f"#{trade['id']} ${base_currency}", callback_data=f"check_{trade['id']}")
+        chart_button = InlineKeyboardButton("📊 Chart", url=generate_tradingview_link(trade['symbol']))
+        keyboard.append([details_button, chart_button])
+
+    keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="db_trades")])
+    keyboard.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")])
+    await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1954,10 +1982,16 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("لم يتم العثور على الصفقة."); return
 
     trade = dict(trade)
-    keyboard = [[InlineKeyboardButton("🚨 بيع فوري (بسعر السوق)", callback_data=f"manual_sell_confirm_{trade_id}")], [InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]]
+    base_currency = trade['symbol'].split('/')[0]
+    chart_link = generate_tradingview_link(trade['symbol'])
+
+    keyboard = [
+        [InlineKeyboardButton("🚨 بيع فوري (بسعر السوق)", callback_data=f"manual_sell_confirm_{trade_id}")],
+        [InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]
+    ]
     
     if trade['status'] == 'pending':
-        message = f"**⏳ حالة الصفقة #{trade_id}**\n- **العملة:** `{trade['symbol']}`\n- **الحالة:** في انتظار تأكيد التنفيذ..."
+        message = f"**⏳ حالة الصفقة #{trade_id}**\n- **العملة:** `${base_currency}`\n- **الحالة:** في انتظار تأكيد التنفيذ...\n\n[📊 فتح الرسم البياني]({chart_link})"
         keyboard = [[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]]
     else:
         try:
@@ -1967,22 +2001,23 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
             pnl = (current_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (current_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             pnl_text = f"💰 **الربح/الخسارة الحالية:** `${pnl:+.2f}` ({pnl_percent:+.2f}%)"
-            current_price_text = f"- **السعر الحالي:** `${current_price}`"
+            current_price_text = f"- **السعر الحالي:** `${format_price(current_price)}`"
         except Exception:
             pnl_text = "💰 تعذر جلب الربح/الخسارة الحالية."
-            current_price_text = "- **السعر الحالي:** `تعذر الجلب`"
+            current_price_text = f"- **السعر الحالي:** `تعذر الجلب`"
 
         message = (
             f"**✅ حالة الصفقة #{trade_id}**\n\n"
-            f"- **العملة:** `{trade['symbol']}`\n"
-            f"- **سعر الدخول:** `${trade['entry_price']}`\n"
+            f"- **العملة:** `${base_currency}`\n"
+            f"- **سعر الدخول:** `${format_price(trade['entry_price'])}`\n"
             f"{current_price_text}\n"
             f"- **الكمية:** `{trade['quantity']}`\n"
             f"----------------------------------\n"
-            f"- **الهدف (TP):** `${trade['take_profit']}`\n"
-            f"- **الوقف (SL):** `${trade['stop_loss']}`\n"
+            f"- **الهدف (TP):** `${format_price(trade['take_profit'])}`\n"
+            f"- **الوقف (SL):** `${format_price(trade['stop_loss'])}`\n"
             f"----------------------------------\n"
-            f"{pnl_text}"
+            f"{pnl_text}\n\n"
+            f"[📊 فتح الرسم البياني]({chart_link})"
         )
     await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -2413,16 +2448,15 @@ async def handle_manual_sell_execute(update: Update, context: ContextTypes.DEFAU
 
         trade = dict(trade)
         ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
-        if not ticker or 'last' not in ticker:
+        if not ticker:
             await safe_send_message(context.bot, f"🚨 فشل البيع اليدوي للصفقة #{trade_id}. السبب: تعذر جلب السعر الحالي.")
             await query.answer("🚨 فشل أمر البيع. راجع السجلات.", show_alert=True)
             return
-
+            
         current_price = ticker['last']
-
-        # Use TradeGuardian to perform closure logic
+        
         await bot_data.trade_guardian._close_trade(trade, "إغلاق يدوي", current_price)
-
+        
         await query.answer("✅ تم إرسال أمر البيع بنجاح!")
 
     except Exception as e:
@@ -2560,6 +2594,7 @@ async def post_init(application: Application):
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
     jq.run_repeating(wise_man.review_portfolio_risk, interval=3600, first=90, name="wise_man_portfolio_review")
     jq.run_repeating(wise_man.review_active_trades_with_tactics, interval=900, first=120, name="wise_man_tactical_review")
+    jq.run_repeating(wise_man.review_trade_thesis, interval=300, first=45, name="review_trade_thesis")
     jq.run_repeating(wise_man.train_ml_model, interval=604800, first=3600, name="wise_man_ml_train")
 
     logger.info(f"All jobs scheduled. OKX Bot is fully operational.")
