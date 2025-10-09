@@ -2788,18 +2788,50 @@ async def post_shutdown(application: Application):
         await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
-def main():
-    logger.info("Starting OKX Maestro Bot V9.5...")
-    app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
-    app_builder.post_init(post_init).post_shutdown(post_shutdown)
-    application = app_builder.build()
+async def main() -> None:
+    """Initializes and runs the bot application using the modern concurrent approach."""
+    logger.info("Starting OKX Maestro Bot V10.0 (Final Architecture)...")
+    
+    # بناء التطبيق وتمرير post_init. هذا لا يزال صحيحًا.
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
+    # تسجيل المعالجات كالمعتاد
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
 
-    application.run_polling()
-    
-if __name__ == '__main__':
-    main()
+    # --- [الإصلاح الحاسم النهائي V10.0] ---
+    # هذه هي الطريقة الصحيحة لتشغيل كل شيء بشكل متزامن دون تجميد
+    try:
+        logger.info("Starting application concurrently...")
+        # سنقوم بتشغيل التطبيق (الذي سيشغل post_init) وعملية الـ polling معًا
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        
+        logger.info("Application started successfully. Bot is now polling for updates.")
+        
+        # حلقة لا نهائية لإبقاء البرنامج الرئيسي (وبالتالي كل المهام الخلفية) حيًا
+        # هذا يمنع البرنامج من الانتهاء بعد بدء التشغيل
+        while True:
+            await asyncio.sleep(3600)
+            
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutdown initiated by user...")
+    finally:
+        logger.info("Shutting down application...")
+        if application.updater and application.updater.is_running:
+            await application.updater.stop()
+        if application.running:
+            await application.stop()
+        await application.shutdown()
+        logger.info("Application shut down gracefully.")
+
+
+if __name__ == "__main__":
+    # هذا هو المشغل النهائي الذي يضمن عدم وجود صراع في الحلقات
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutdown successful.")
