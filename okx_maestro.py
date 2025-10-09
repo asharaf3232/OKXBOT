@@ -1746,53 +1746,56 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"🚨 Supervisor failed to intervene for trade #{trade['id']}: {e}")
 
-    # --- [V9.5] State Reconciliation Logic ---
-    # --- [V9.5 - Hardened] State Reconciliation Logic ---
-    logger.info("🕵️ Supervisor: Reconciling exchange portfolio with DB...")
-    try:
-        balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
-        if not balance: return
+    # 
 
-        # --- [الإصلاح] ---
-        # 1. تحديد كل الرموز التي نملكها ونحتاج سعرها
-        assets_to_price = [f"{asset}/USDT" for asset, data in balance.items() if asset != 'USDT' and data.get('total', 0) > 0]
-        
-        # 2. جلب كل الأسعار دفعة واحدة
-        tickers = {}
-        if assets_to_price:
-            tickers = await safe_api_call(lambda: bot_data.exchange.fetch_tickers(assets_to_price))
-        if not tickers:
-            logger.warning("Auditor: Could not fetch any tickers for portfolio valuation.")
-            return
-        # --- [نهاية الإصلاح] ---
+        # --- [V9.6 - Ultimate Fix] State Reconciliation Logic ---
+        logger.info("🕵️ Supervisor: Reconciling exchange portfolio with DB...")
+        try:
+            balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
+            if not balance:
+                logger.error("Auditor failed: Could not fetch balance.")
+                return
 
-        exchange_assets = {}
-        for asset, data in balance.items():
-            if asset == 'USDT' or data.get('total', 0) <= 0: continue
-            
-            symbol_usdt = f"{asset}/USDT"
-            ticker = tickers.get(symbol_usdt)
-            
-            if not ticker or 'last' not in ticker: continue
-            
-            value_usd = data['total'] * ticker['last']
-            if value_usd > 2:
-                exchange_assets[asset] = data['total']
+            # 1. احصل على كل الأصول التي لديك (بخلاف USDT)
+            assets_on_exchange = {
+                asset: data['total'] for asset, data in balance.items()
+                if asset != 'USDT' and data.get('total', 0) > 0
+            }
+            if not assets_on_exchange:
+                logger.info("Auditor: No non-USDT assets to reconcile.")
+                return
 
-        # Get active trades from the bot's database
-        async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.execute("SELECT symbol FROM trades WHERE status = 'active'")
-            db_active_symbols = {row[0].split('/')[0] for row in await cursor.fetchall()}
+            # 2. احصل على قائمة الصفقات النشطة من قاعدة البيانات
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.execute("SELECT symbol FROM trades WHERE status = 'active'")
+                db_active_symbols = {row[0] for row in await cursor.fetchall()}
 
-        # Find the orphans
-        for asset, quantity in exchange_assets.items():
-            if asset not in db_active_symbols:
-                logger.warning(f"🕵️ Supervisor found an orphaned position: {quantity} {asset}")
-                symbol_usdt = f"{asset}/USDT"
-                await handle_orphaned_trade(context, symbol_usdt, quantity)
+            # 3. ابحث عن الأيتام
+            for asset, quantity in assets_on_exchange.items():
+                symbol_pair = f"{asset}/USDT"
+                
+                # إذا كان الأصل يتبع لصفقة نشطة، تجاهله
+                if symbol_pair in db_active_symbols:
+                    continue
 
-    except Exception as e:
-        logger.error(f"Error during state reconciliation: {e}", exc_info=True)
+                # إذا لم يكن يتبع لصفقة نشطة، فهو يتيم. تحقق من قيمته.
+                try:
+                    ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(symbol_pair))
+                    if not ticker or 'last' not in ticker or ticker['last'] is None:
+                        logger.warning(f"Auditor: Could not fetch price for potential orphan {asset}. Skipping.")
+                        continue
+                    
+                    value_usd = quantity * ticker['last']
+
+                    if value_usd > 2.0:
+                        logger.warning(f"🕵️ Supervisor found an orphaned position: {quantity} {asset} (Value: ${value_usd:.2f})")
+                        await handle_orphaned_trade(context, symbol_pair, quantity)
+
+                except Exception as e:
+                    logger.error(f"Auditor: Error while valuing potential orphan {asset}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error during state reconciliation: {e}", exc_info=True)
 
 # --- [V9.5] Core Interaction and Action Functions ---
 async def handle_orphaned_trade(context: ContextTypes.DEFAULT_TYPE, symbol: str, quantity: float):
