@@ -2792,7 +2792,7 @@ async def main() -> None:
     """Initializes and runs the bot application using the modern concurrent approach."""
     logger.info("Starting OKX Maestro Bot V10.0 (Final Architecture)...")
     
-    # بناء التطبيق وتمرير post_init. هذا لا يزال صحيحًا.
+    # بناء التطبيق وتمرير post_init.
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # تسجيل المعالجات كالمعتاد
@@ -2807,13 +2807,12 @@ async def main() -> None:
         logger.info("Starting application concurrently...")
         # سنقوم بتشغيل التطبيق (الذي سيشغل post_init) وعملية الـ polling معًا
         await application.initialize()
-        await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await application.start()
         
         logger.info("Application started successfully. Bot is now polling for updates.")
         
         # حلقة لا نهائية لإبقاء البرنامج الرئيسي (وبالتالي كل المهام الخلفية) حيًا
-        # هذا يمنع البرنامج من الانتهاء بعد بدء التشغيل
         while True:
             await asyncio.sleep(3600)
             
@@ -2830,7 +2829,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # هذا هو المشغل النهائي الذي يضمن عدم وجود صراع في الحلقات
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
