@@ -2573,11 +2573,11 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down gracefully.")
 
 # =======================================================================================
-# --- 🚀 The Final Asynchronous Main Loop 🚀 ---
+# --- 🚀 The Final Correct Asynchronous Main Loop 🚀 ---
 # =======================================================================================
 
-async def main():  # لاحظ كلمة async هنا
-    """Starts and runs the bot until you press Ctrl-C"""
+async def main():
+    """Starts and runs the bot with a graceful shutdown."""
     logger.info("Starting OKX Maestro Bot V9.5...")
     
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
@@ -2590,17 +2590,33 @@ async def main():  # لاحظ كلمة async هنا
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    # Run the bot until the user presses Ctrl-C
+    # --- [التعديل الحاسم] ---
+    # نستخدم هذه الأوامر بدلًا من run_polling لتجنب الصدام
     try:
-        logger.info("Application configured. Starting polling...")
-        await application.run_polling()
-    except Exception as e:
-        logger.critical(f"A critical error occurred in the main polling loop: {e}", exc_info=True)
+        await application.initialize()  # يجهز التطبيق
+        await application.start()       # يبدأ جلب التحديثات في الخلفية
+        await application.updater.start_polling() # يبدأ عملية سؤال تيليجرام عن الرسائل
+        
+        logger.info("Bot is now running. Press Ctrl-C to stop.")
+        
+        # حلقة لا نهائية لإبقاء البرنامج يعمل
+        while True:
+            await asyncio.sleep(3600) # يمكن وضع أي مدة طويلة هنا
+
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Shutdown signal received.")
+    finally:
+        # التأكد من إيقاف كل شيء بشكل سليم عند الخروج
+        if application.updater and application.updater.is_running:
+            await application.updater.stop()
+        if application.running:
+            await application.stop()
+        await application.shutdown()
+        logger.info("Bot shutdown complete.")
+
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped by user.")
     except Exception as e:
-        logger.critical(f"Bot failed to start: {e}", exc_info=True)
+        logger.critical(f"Bot failed to start or run: {e}", exc_info=True)
