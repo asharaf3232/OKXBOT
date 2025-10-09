@@ -2127,9 +2127,12 @@ async def show_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     for trade in trades:
         status_emoji = "✅" if trade['status'] == 'active' else "⏳"
         base_currency = trade['symbol'].split('/')[0]
-        details_button = InlineKeyboardButton(f"#{trade['id']} ${base_currency}", callback_data=f"check_{trade['id']}")
-        chart_button = InlineKeyboardButton("📊 Chart", url=generate_tradingview_link(trade['symbol']))
-        keyboard.append([details_button, chart_button])
+        button_text = f"#{trade['id']} {status_emoji} | ${base_currency}"
+        
+        # إنشاء زر واحد فقط لكل صفة
+        keyboard.append([
+            InlineKeyboardButton(button_text, callback_data=f"check_{trade['id']}")
+        ])
 
     keyboard.append([InlineKeyboardButton("🔄 تحديث", callback_data="db_trades")])
     keyboard.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")])
