@@ -2572,18 +2572,35 @@ async def post_shutdown(application: Application):
         await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
-def main():
-    logger.info("Starting OKX Maestro Bot V8.1...")
+# =======================================================================================
+# --- 🚀 The Final Asynchronous Main Loop 🚀 ---
+# =======================================================================================
+
+async def main():  # لاحظ كلمة async هنا
+    """Starts and runs the bot until you press Ctrl-C"""
+    logger.info("Starting OKX Maestro Bot V9.5...")
+    
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
 
+    # Add all your handlers here as before
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
-
-    application.run_polling()
     
+    # Run the bot until the user presses Ctrl-C
+    try:
+        logger.info("Application configured. Starting polling...")
+        await application.run_polling()
+    except Exception as e:
+        logger.critical(f"A critical error occurred in the main polling loop: {e}", exc_info=True)
+
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped by user.")
+    except Exception as e:
+        logger.critical(f"Bot failed to start: {e}", exc_info=True)
