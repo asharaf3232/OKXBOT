@@ -461,7 +461,7 @@ class WiseMan:
 
                         if current_profit_pct < stagnation_profit_pct:
                             logger.warning(f"Thesis INVALID for trade #{trade['id']} ({trade['symbol']}). Stagnant for {minutes_since_open:.0f} mins.")
-                            await conn.execute("UPDATE trades SET status = ? WHERE id = ?", ('force_exit_thesis_invalid', trade['id'])
+                            await conn.execute("UPDATE trades SET status = ? WHERE id = ?", ('force_exit_thesis_invalid', trade['id']))
                             await conn.commit()
                             from okx_maestro import safe_send_message
                             await safe_send_message(self.application.bot, f"⏳ **بطلان الفرضية | #{trade['id']} {trade['symbol']}**\nالصفقة راكدة، سيتم محاولة إغلاقها الآن.")
