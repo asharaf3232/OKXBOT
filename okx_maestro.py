@@ -2577,46 +2577,45 @@ async def post_shutdown(application: Application):
 # =======================================================================================
 
 async def main():
-    """Starts and runs the bot with a graceful shutdown."""
-    logger.info("Starting OKX Maestro Bot V9.5...")
+    """Starts and runs the bot with all its asynchronous components."""
+    logger.info("Configuring OKX Maestro Bot V9.5 application...")
     
+    # بناء التطبيق مع تسجيل دوال بدء التشغيل والإغلاق
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
 
-    # Add all your handlers here as before
+    # إضافة كل المعالجات (Handlers) الخاصة بك
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    # --- [التعديل الحاسم] ---
-    # نستخدم هذه الأوامر بدلًا من run_polling لتجنب الصدام
-    try:
-        await application.initialize()  # يجهز التطبيق
-        await application.start()       # يبدأ جلب التحديثات في الخلفية
-        await application.updater.start_polling() # يبدأ عملية سؤال تيليجرام عن الرسائل
-        
-        logger.info("Bot is now running. Press Ctrl-C to stop.")
-        
-        # حلقة لا نهائية لإبقاء البرنامج يعمل
-        while True:
-            await asyncio.sleep(3600) # يمكن وضع أي مدة طويلة هنا
-
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutdown signal received.")
-    finally:
-        # التأكد من إيقاف كل شيء بشكل سليم عند الخروج
-        if application.updater and application.updater.is_running:
-            await application.updater.stop()
-        if application.running:
-            await application.stop()
-        await application.shutdown()
-        logger.info("Bot shutdown complete.")
+    # --- [هذا هو التعديل الحاسم] ---
+    # هذه الأوامر تقوم بتشغيل البوت داخل حلقة asyncio موجودة بالفعل دون تضارب
+    
+    logger.info("Initializing application...")
+    await application.initialize()
+    
+    logger.info("Starting background tasks (updater, job_queue)...")
+    await application.start()
+    
+    logger.info("Starting updater polling...")
+    await application.updater.start_polling()
+    
+    logger.info("✅ Bot is now fully operational and polling for updates.")
+    
+    # حلقة لا نهائية لإبقاء البرنامج الرئيسي يعمل في الخلفية
+    # طالما هذا الجزء يعمل، ستستمر كل المهام غير المتزامنة (البوت والويب سوكت) في العمل
+    while True:
+        await asyncio.sleep(3600)  # ينام لمدة ساعة، ثم يكرر
 
 
 if __name__ == '__main__':
+    # هذه هي نقطة البداية التي تنشئ حلقة asyncio الرئيسية التي سيعمل عليها كل شيء
     try:
         asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped by user command (Ctrl+C).")
     except Exception as e:
-        logger.critical(f"Bot failed to start or run: {e}", exc_info=True)
+        logger.critical(f"The bot failed to start or crashed unexpectedly.", exc_info=True)
