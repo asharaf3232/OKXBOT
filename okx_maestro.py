@@ -1747,21 +1747,35 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"🚨 Supervisor failed to intervene for trade #{trade['id']}: {e}")
 
     # --- [V9.5] State Reconciliation Logic ---
+    # --- [V9.5 - Hardened] State Reconciliation Logic ---
     logger.info("🕵️ Supervisor: Reconciling exchange portfolio with DB...")
     try:
         balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
         if not balance: return
 
-        # Get assets held on the exchange with a value > $2
+        # --- [الإصلاح] ---
+        # 1. تحديد كل الرموز التي نملكها ونحتاج سعرها
+        assets_to_price = [f"{asset}/USDT" for asset, data in balance.items() if asset != 'USDT' and data.get('total', 0) > 0]
+        
+        # 2. جلب كل الأسعار دفعة واحدة
+        tickers = {}
+        if assets_to_price:
+            tickers = await safe_api_call(lambda: bot_data.exchange.fetch_tickers(assets_to_price))
+        if not tickers:
+            logger.warning("Auditor: Could not fetch any tickers for portfolio valuation.")
+            return
+        # --- [نهاية الإصلاح] ---
+
         exchange_assets = {}
         for asset, data in balance.items():
             if asset == 'USDT' or data.get('total', 0) <= 0: continue
+            
             symbol_usdt = f"{asset}/USDT"
-            if symbol_usdt not in bot_data.exchange.markets: continue
-            ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(symbol_usdt))
-            if not ticker: continue
-            current_price = ticker['last']
-            value_usd = data['total'] * current_price
+            ticker = tickers.get(symbol_usdt)
+            
+            if not ticker or 'last' not in ticker: continue
+            
+            value_usd = data['total'] * ticker['last']
             if value_usd > 2:
                 exchange_assets[asset] = data['total']
 
@@ -1775,7 +1789,6 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
             if asset not in db_active_symbols:
                 logger.warning(f"🕵️ Supervisor found an orphaned position: {quantity} {asset}")
                 symbol_usdt = f"{asset}/USDT"
-                # Call the handler to start the interactive process
                 await handle_orphaned_trade(context, symbol_usdt, quantity)
 
     except Exception as e:
