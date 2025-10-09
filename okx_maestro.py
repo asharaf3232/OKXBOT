@@ -2881,20 +2881,25 @@ async def post_shutdown(application: Application):
         await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
-async def main(): # <--- ١. إضافة كلمة async هنا
-    logger.info("Starting OKX Maestro Bot V9.6...")
+def main():
+    """Starts the bot."""
+    logger.info("Starting OKX Maestro Bot V9.7 (Stable)...")
+    
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
+    
+    # Register post-init and post-shutdown handlers
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
+    
     application = app_builder.build()
 
+    # Register command and message handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
-    # ٢. استدعاء الدالة باستخدام await
-    await application.run_polling()
-    
+    # Run the bot until the user presses Ctrl-C
+    application.run_polling()
+
 if __name__ == '__main__':
-    # ٣. تشغيل الدالة الرئيسية باستخدام asyncio.run()
-    asyncio.run(main())
+    main()
