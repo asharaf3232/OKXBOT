@@ -2881,35 +2881,25 @@ async def post_shutdown(application: Application):
         await bot_data.exchange.close()
     logger.info("Bot has shut down gracefully.")
 
-async def main(): # <--- مهم: يجب أن تكون الدالة async
-    """Runs the bot."""
-    logger.info("Starting OKX Maestro Bot V9.8 (Final Architecture)...")
+async def main():
+    """Initializes and runs the bot."""
     
-    # بناء التطبيق كالمعتاد
-    application = (
-        Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    )
+    # post_init now handles all the async setup
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
-    # إضافة المعالجات
+    # Register handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
-
-    # --- [الإصلاح الحاسم النهائي] ---
-    # التشغيل غير المتزامن الكامل
-    async with application:
-        await application.initialize() # تهيئة التطبيق
-        await application.start()      # بدء استقبال التحديثات من تليجرام
-        await application.updater.start_polling() # بدء عملية Polling
-        
-        # إبقاء البرنامج يعمل
-        while True:
-            await asyncio.sleep(3600)
-    # --- [نهاية الإصلاح] ---
+    
+    # Run the bot until the user presses Ctrl-C
+    # This will now run correctly within the async context created by asyncio.run()
+    await application.run_polling()
 
 
 if __name__ == "__main__":
+    logger.info("Starting OKX Maestro Bot V9.9 (Final Stable)...")
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
