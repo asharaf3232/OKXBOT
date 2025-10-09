@@ -247,7 +247,25 @@ def generate_tradingview_link(symbol: str, exchange: str = "OKX") -> str:
     tv_symbol = symbol.replace('/', '')
     return f"https://www.tradingview.com/chart/?symbol={exchange.upper()}:{tv_symbol.upper()}"
 
+async def process_reconstruction(update: Update, symbol: str, entry_price: float):
+    """
+    [V9.6] Helper function to run the reconstruction process in the background.
+    """
+    try:
+        balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
+        base_currency = symbol.split('/')[0]
+        quantity = balance.get(base_currency, {}).get('total', 0.0)
 
+        if quantity > 0:
+            if await reconstruct_trade(symbol, entry_price, quantity):
+                await update.message.reply_text(f"✅ **تم التبني بنجاح!**\nتمت إضافة صفقة `${base_currency}` إلى قائمة الصفقات النشطة.")
+            else:
+                await update.message.reply_text("🚨 **فشل التبني.** حدث خطأ أثناء إعادة بناء الصفقة. يرجى مراجعة السجلات.")
+        else:
+            await update.message.reply_text(f"⚠️ **فشل التبني:** لم يتم العثور على رصيد لعملة `${base_currency}`.")
+    except Exception as e:
+        logger.error(f"Error during background reconstruction: {e}")
+        await update.message.reply_text("🚨 **فشل التبني.** حدث خطأ فادح أثناء العملية.")
 # --- الحالة العامة للبوت ---
 class BotState:
     def __init__(self):
@@ -1982,31 +2000,25 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else: await target_message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # [V9.5 - Hardened] Handle entry price for orphaned trade adoption
+    # [V9.6 - Hardened & Non-Blocking] Handle entry price for orphaned trade adoption
     if 'awaiting_entry_price_for' in context.user_data:
         symbol = context.user_data.pop('awaiting_entry_price_for')
         try:
             entry_price = float(update.message.text.strip())
-            # We need to get the quantity from the exchange balance
-            balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
-            base_currency = symbol.split('/')[0]
-            quantity = balance.get(base_currency, {}).get('total', 0.0)
-
-            if quantity > 0:
-                if await reconstruct_trade(symbol, entry_price, quantity):
-                    await update.message.reply_text(f"✅ **تم التبني بنجاح!**\nتمت إضافة صفقة `${base_currency}` إلى قائمة الصفقات النشطة.")
-                else:
-                    await update.message.reply_text("🚨 **فشل التبني.** حدث خطأ أثناء إعادة بناء الصفقة. يرجى مراجعة السجلات.")
-            else:
-                await update.message.reply_text(f"⚠️ **فشل التبني:** لم يتم العثور على رصيد لعملة `${base_currency}`.")
+            
+            # --- [الإصلاح النهائي لمنع التجمد] ---
+            # 1. أرسل ردًا فوريًا للمستخدم بأن الطلب قيد المعالجة
+            await update.message.reply_text(f"⏳ جاري تبني صفقة `${symbol.split('/')[0]}`... سأرسل تأكيدًا عند الانتهاء.")
+            
+            # 2. قم بتشغيل المهمة الطويلة في الخلفية ولا تنتظرها
+            asyncio.create_task(process_reconstruction(update, symbol, entry_price))
+            # ------------------------------------
 
         except ValueError:
             await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال سعر الدخول كرقم فقط.")
             context.user_data['awaiting_entry_price_for'] = symbol # Re-set state to allow another try
         
-        # --- [الإصلاح الحاسم هنا] ---
-        return # نوقف التنفيذ هنا بعد الانتهاء من منطق التبني
-        # ---------------------------
+        return # نوقف التنفيذ هنا بعد إطلاق المهمة في الخلفية
 
     # The rest of the function for settings and main menu
     if 'setting_to_change' in context.user_data or 'blacklist_action' in context.user_data:
