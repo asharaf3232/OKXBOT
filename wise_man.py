@@ -439,34 +439,50 @@ class WiseMan:
                     except Exception as e:
                         logger.error(f"Maestro: Error during tactical review for {symbol}: {e}", exc_info=True)
     async def review_trade_thesis(self, context: object = None):
-        """[Stage 1] Periodically reviews active trades to invalidate the thesis for stagnant ones."""
-        logger.info("🧐 Maestro: Reviewing thesis for active trades...")
-        try:
-            async with aiosqlite.connect(self.db_file) as conn:
-                conn.row_factory = aiosqlite.Row
-                active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+    """
+    [V9.3 - Hardened] Checks for stagnant trades, flags them, and IMMEDIATELY triggers the Guardian to close them.
+    """
+    logger.info("🩺 Maestro: Running periodic thesis validation for active trades...")
+    try:
+        async with aiosqlite.connect(self.db_file) as conn:
+            conn.row_factory = aiosqlite.Row
+            active_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
 
-                stagnation_minutes = 90
-                stagnation_profit_pct = 0.5
+            stagnation_minutes = 90
+            stagnation_profit_pct = 0.5
 
-                for trade_data in active_trades:
-                    trade = dict(trade_data)
-                    trade_open_time = datetime.fromisoformat(trade['timestamp'])
-                    minutes_since_open = (datetime.now(timezone.utc) - trade_open_time).total_seconds() / 60
+            for trade_data in active_trades:
+                trade = dict(trade_data)
+                trade_open_time = datetime.fromisoformat(trade['timestamp'])
+                minutes_since_open = (datetime.now(timezone.utc).astimezone(trade_open_time.tzinfo) - trade_open_time).total_seconds() / 60
 
-                    if minutes_since_open > stagnation_minutes:
-                        # Check current profit
-                        highest_price = trade.get('highest_price', trade['entry_price'])
-                        current_profit_pct = ((highest_price / trade['entry_price']) - 1) * 100
+                if minutes_since_open > stagnation_minutes:
+                    highest_price = trade.get('highest_price', trade['entry_price'])
+                    current_profit_pct = ((highest_price / trade['entry_price']) - 1) * 100 if trade['entry_price'] > 0 else 0
 
-                        if current_profit_pct < stagnation_profit_pct:
-                            logger.warning(f"Thesis INVALID for trade #{trade['id']} ({trade['symbol']}). Stagnant for {minutes_since_open:.0f} mins.")
-                            await conn.execute("UPDATE trades SET status = ? WHERE id = ?", ('force_exit_thesis_invalid', trade['id']))
-                            await conn.commit()
-                            from okx_maestro import safe_send_message
-                            await safe_send_message(self.application.bot, f"⏳ **بطلان الفرضية | #{trade['id']} {trade['symbol']}**\nالصفقة راكدة، سيتم محاولة إغلاقها الآن.")
-        except Exception as e:
-            logger.error(f"Maestro: Error during trade thesis review: {e}", exc_info=True)
+                    if current_profit_pct < stagnation_profit_pct:
+                        logger.warning(f"Thesis INVALID for trade #{trade['id']} ({trade['symbol']}). Stagnant for {minutes_since_open:.0f} mins. Triggering immediate closure.")
+                        
+                        # الخطوة 1: تحديث الحالة كالمعتاد
+                        await conn.execute("UPDATE trades SET status = ? WHERE id = ?", ('force_exit_thesis_invalid', trade['id']))
+                        await conn.commit()
+                        
+                        # --- [الإضافة الحاسمة] ---
+                        # الخطوة 2: إيقاظ الحارس فورًا وإجباره على الإغلاق
+                        try:
+                            # جلب السعر الحالي يدويًا
+                            ticker = await self.exchange.fetch_ticker(trade['symbol'])
+                            current_price = ticker['last']
+                            
+                            # استدعاء دالة الإغلاق مباشرة من كائن الحارس
+                            logger.info(f"Waking up the Guardian to close #{trade['id']} at price {current_price}")
+                            await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بطلان الفرضية)", current_price)
+                        except Exception as e:
+                            logger.error(f"Failed to immediately trigger Guardian for closing trade #{trade['id']}: {e}")
+                        # --- [نهاية الإضافة] ---
+
+    except Exception as e:
+        logger.error(f"Maestro: Error during trade thesis review: {e}", exc_info=True)
 
     # ==============================================================================
     # --- ♟️ المدير الاستراتيجي (يعمل كل ساعة) ♟️ ---
