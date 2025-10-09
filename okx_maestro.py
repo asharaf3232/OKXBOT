@@ -1709,43 +1709,96 @@ class TradeGuardian:
             logger.error(f"Guardian Sync Error: {e}")
 
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("🕵️ Supervisor: Auditing pending trades and failed closures...")
-    async with aiosqlite.connect(DB_FILE) as conn:
-        conn.row_factory = aiosqlite.Row
-        
-        two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
-        stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
-        for trade_data in stuck_trades:
-            trade = dict(trade_data)
-            order_id, symbol = trade['order_id'], trade['symbol']
-            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
-            try:
-                order_status = await safe_api_call(lambda: bot_data.exchange.fetch_order(order_id, symbol))
-                if not order_status: continue
-                if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
-                    await activate_trade(order_id, symbol)
-                elif order_status['status'] in ['canceled', 'expired']:
+    logger.info("🕵️ Supervisor: Auditing pending trades, failed closures, and orphaned positions...")
+    
+    # --- الجزء الأول: تدقيق الصفقات العالقة والفاشلة (الكود الحالي الخاص بك) ---
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            
+            # تدقيق الصفقات العالقة في حالة "Pending"
+            two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
+            stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
+            for trade_data in stuck_trades:
+                trade = dict(trade_data)
+                order_id, symbol = trade['order_id'], trade['symbol']
+                logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
+                try:
+                    order_status = await safe_api_call(lambda: bot_data.exchange.fetch_order(order_id, symbol))
+                    if not order_status: continue
+                    if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
+                        await activate_trade(order_id, symbol)
+                    elif order_status['status'] in ['canceled', 'expired']:
+                        await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
+                    await conn.commit()
+                except ccxt.OrderNotFound:
                     await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
-                await conn.commit()
-            except ccxt.OrderNotFound:
-                await conn.execute("DELETE FROM trades WHERE id = ?", (trade['id'],))
-                await conn.commit()
-            except Exception as e:
-                logger.error(f"🕵️ Supervisor error processing stuck trade #{trade['id']}: {e}", extra={'trade_id': trade['id']})
+                    await conn.commit()
+                except Exception as e:
+                    logger.error(f"🕵️ Supervisor error processing stuck trade #{trade['id']}: {e}", extra={'trade_id': trade['id']})
 
-        failed_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'closure_failed' OR status = 'incubated'")).fetchall()
-        for trade_data in failed_trades:
-            trade = dict(trade_data)
-            logger.warning(f"🚨 Supervisor: Found failed closure for trade #{trade['id']}. Retrying intervention.")
+            # تدقيق الصفقات الفاشلة في الإغلاق أو في الحضانة
+            failed_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'closure_failed' OR status = 'incubated'")).fetchall()
+            for trade_data in failed_trades:
+                trade = dict(trade_data)
+                logger.warning(f"🚨 Supervisor: Found failed closure for trade #{trade['id']}. Retrying intervention.")
+                try:
+                    ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
+                    if ticker and ticker.get('last'):
+                        current_price = ticker.get('last')
+                        await bot_data.trade_guardian._close_trade(trade, "إغلاق إجباري (مشرف)", current_price)
+                except Exception as e:
+                    logger.error(f"🚨 Supervisor failed to intervene for trade #{trade['id']}: {e}")
+    except Exception as e:
+        logger.error(f"Error during initial supervisor audit: {e}", exc_info=True)
+
+
+    # --- الجزء الثاني: منطق اكتشاف وتبني الصفقات اليتيمة (الإضافة الجديدة) ---
+    logger.info("🕵️ Supervisor: Reconciling exchange portfolio with DB...")
+    try:
+        balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
+        if not balance:
+            logger.error("Auditor failed: Could not fetch balance.")
+            return
+
+        # 1. احصل على كل الأصول التي لديك (بخلاف USDT)
+        assets_on_exchange = {
+            asset: data['total'] for asset, data in balance.items()
+            if isinstance(data, dict) and 'total' in data and asset != 'USDT' and data.get('total', 0) > 0
+        }
+        if not assets_on_exchange:
+            logger.info("Auditor: No non-USDT assets to reconcile.")
+            return
+
+        # 2. احصل على قائمة الصفقات النشطة من قاعدة البيانات
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor = await conn.execute("SELECT symbol FROM trades WHERE status = 'active'")
+            db_active_symbols_base = {row[0].split('/')[0] for row in await cursor.fetchall()}
+
+        # 3. ابحث عن الأيتام
+        for asset, quantity in assets_on_exchange.items():
+            if asset in db_active_symbols_base:
+                continue
+
+            # إذا لم يكن يتبع لصفقة نشطة، فهو يتيم. تحقق من قيمته.
             try:
-                ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(trade['symbol']))
-                if ticker:
-                    current_price = ticker.get('last')
-                    if current_price:
-                        await TradeGuardian(context.application)._close_trade(trade, "إغلاق إجباري (مشرف)", current_price)
-            except Exception as e:
-                logger.error(f"🚨 Supervisor failed to intervene for trade #{trade['id']}: {e}")
+                symbol_pair = f"{asset}/USDT"
+                ticker = await safe_api_call(lambda: bot_data.exchange.fetch_ticker(symbol_pair))
+                if not ticker or 'last' not in ticker or ticker['last'] is None:
+                    logger.warning(f"Auditor: Could not fetch price for potential orphan {asset}. Skipping.")
+                    continue
+                
+                value_usd = quantity * ticker['last']
 
+                if value_usd > 2.0:
+                    logger.warning(f"🕵️ Supervisor found an orphaned position: {quantity} {asset} (Value: ${value_usd:.2f})")
+                    await handle_orphaned_trade(context, symbol_pair, quantity)
+
+            except Exception as e:
+                logger.error(f"Auditor: Error while valuing potential orphan {asset}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error during state reconciliation: {e}", exc_info=True)
     # 
 
         # --- [V9.6 - Ultimate Fix] State Reconciliation Logic ---
