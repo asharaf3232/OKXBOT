@@ -953,6 +953,14 @@ async def worker_batch(queue, signals_list, errors_list):
                 queue.task_done()
 
 async def handle_order_update(order_data):
+    """[الحل المقترح] يتم استدعاؤها عند ورود تحديث لأمر، متوافقة مع بيانات ccxt الموحدة."""
+    # ccxt تستخدم 'status': 'closed' للأوامر المنفذة بالكامل و 'filled' > 0
+    if order_data.get('status') == 'closed' and order_data.get('side') == 'buy' and order_data.get('filled', 0) > 0:
+        # استخدام المفاتيح الموحدة من ccxt: 'id' و 'symbol'
+        order_id = order_data['id']
+        symbol = order_data['symbol']
+        logger.info(f"Fast Reporter: Received fill for order {order_id}. Activating trade...")
+        await activate_trade(order_id, symbol)
     """يتم استدعاؤها عند ورود تحديث لأمر من مراسل البيانات."""
     if order_data.get('state') == 'filled' and order_data.get('side') == 'buy':
         logger.info(f"Fast Reporter: Received fill for order {order_data['ordId']}. Activating trade...")
@@ -1197,87 +1205,355 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                                    f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
 
 # =======================================================================================
-# --- 🚀 Optimized WebSocket Manager V14.0 🚀 ---
+# --- 🚀 [الحل الكامل] Optimized WebSocket Manager V14.1 🚀 ---
 # =======================================================================================
 
 class OptimizedWebSocketManager:
-    """[V14.0] WebSocket Manager موحد يعتمد على ccxt للبيانات العامة والخاصة مع إعادة اتصال تلقائي."""
+    """[V14.1 الحل المقترح] مدير WebSocket قوي يعتمد على حلقات منفصلة ومكتبة ccxt لإعادة الاتصال."""
     def __init__(self, application):
         self.application = application
         self.exchange = bot_data.exchange
         self.subscribed_tickers = set()
-        self.orders_channel = None
-        self.tickers_channel = None
-        self.running = True
+        self.running = False
+        self._tickers_changed = asyncio.Event()
 
-    async def subscribe_tickers(self, symbols):
-        """إضافة رموز للمراقبة."""
-        for symbol in symbols:
-            self.subscribed_tickers.add(symbol)
-        logger.info(f"WebSocket: Subscribed to tickers: {symbols}")
-        # إعادة تشغيل القناة إذا لزم
-        if self.tickers_channel:
-            await self.tickers_channel.close()
-        if self.subscribed_tickers:
-            self.tickers_channel = self.exchange.watch_tickers(list(self.subscribed_tickers))
+    async def subscribe_tickers(self, symbols: list):
+        """إضافة رموز للمراقبة وإعلام حلقة التيكرز بالتغيير."""
+        new_symbols = set(symbols) - self.subscribed_tickers
+        if new_symbols:
+            self.subscribed_tickers.update(new_symbols)
+            logger.info(f"WebSocket: Subscribing to tickers: {list(new_symbols)}")
+            self._tickers_changed.set()
 
-    async def unsubscribe_tickers(self, symbols):
-        """إزالة رموز من المراقبة."""
-        for symbol in symbols:
-            self.subscribed_tickers.discard(symbol)
-        logger.info(f"WebSocket: Unsubscribed from tickers: {symbols}")
-        # إعادة تشغيل القناة إذا لزم
-        if self.tickers_channel:
-            await self.tickers_channel.close()
-        if self.subscribed_tickers:
-            self.tickers_channel = self.exchange.watch_tickers(list(self.subscribed_tickers))
-        else:
-            self.tickers_channel = None
+    async def unsubscribe_tickers(self, symbols: list):
+        """إزالة رموز من المراقبة وإعلام حلقة التيكرز بالتغيير."""
+        removed_symbols = self.subscribed_tickers.intersection(set(symbols))
+        if removed_symbols:
+            self.subscribed_tickers.difference_update(removed_symbols)
+            logger.info(f"WebSocket: Unsubscribing from tickers: {list(removed_symbols)}")
+            self._tickers_changed.set()
 
-    async def run(self):
-        """حلقة التشغيل الرئيسية مع إعادة اتصال."""
+    async def _watch_orders_loop(self):
+        """حلقة مخصصة لمراقبة تحديثات الأوامر بشكل مستمر."""
         while self.running:
             try:
-                # مراقبة الأوامر (خاصة)
-                if not self.orders_channel:
-                    self.orders_channel = self.exchange.watch_orders()
-                order_update = await asyncio.wait_for(self.orders_channel, timeout=30.0)
-                # order_update is a list of orders
-                for order in order_update:
-                    await handle_order_update(order)
-
-                # مراقبة التيكرز (عامة)
-                if self.subscribed_tickers and not self.tickers_channel:
-                    self.tickers_channel = self.exchange.watch_tickers(list(self.subscribed_tickers))
-                if self.tickers_channel:
-                    ticker_update = await asyncio.wait_for(self.tickers_channel, timeout=30.0)
-                    # ticker_update is dict {symbol: ticker}
-                    for symbol, ticker in ticker_update.items():
-                        await bot_data.trade_guardian.handle_ticker_update(ticker)
-
-            except asyncio.TimeoutError:
-                logger.warning("WebSocket timeout, reconnecting...")
+                orders = await self.exchange.watch_orders()
+                for order in orders:
+                    # نقوم بإنشاء مهمة جديدة لكل أمر لتجنب أي تعطيل في حلقة الاستماع
+                    asyncio.create_task(handle_order_update(order))
             except Exception as e:
-                logger.error(f"WebSocket error: {e}. Reconnecting in 5s...")
+                logger.error(f"WebSocket (Orders): Connection error: {e}. Reconnecting in 5s...")
                 await asyncio.sleep(5)
-            finally:
-                # Clean up channels on error
-                if self.orders_channel:
-                    await self.orders_channel.close()
-                    self.orders_channel = None
-                if self.tickers_channel:
-                    await self.tickers_channel.close()
-                    self.tickers_channel = None
+
+    async def _watch_tickers_loop(self):
+        """حلقة مخصصة لمراقبة أسعار العملات مع القدرة على تحديث قائمة المراقبة ديناميكيًا."""
+        while self.running:
+            # انتظر حتى تكون هناك عملات للمراقبة
+            if not self.subscribed_tickers:
+                await asyncio.sleep(1)
+                continue
+
+            current_subscriptions = list(self.subscribed_tickers)
+            self._tickers_changed.clear()
+            
+            try:
+                # استمر في الاستماع طالما لم تتغير قائمة المراقبة
+                while not self._tickers_changed.is_set() and self.running:
+                    tickers = await self.exchange.watch_tickers(current_subscriptions)
+                    for symbol, ticker in tickers.items():
+                        # تأكد من أن الرمز لا يزال في قائمة المراقبة قبل المعالجة
+                        if symbol in self.subscribed_tickers:
+                            asyncio.create_task(bot_data.trade_guardian.handle_ticker_update(ticker))
+            except Exception as e:
+                logger.error(f"WebSocket (Tickers): Connection error: {e}. Restarting loop...")
+                await asyncio.sleep(5)
+
+    async def run(self):
+        """بدء تشغيل جميع حلقات WebSocket بشكل متوازٍ."""
+        self.running = True
+        logger.info("Optimized WebSocket Manager V14.1 is running.")
+        # تشغيل الحلقتين معًا وانتظارهما
+        await asyncio.gather(
+            self._watch_orders_loop(),
+            self._watch_tickers_loop()
+        )
 
     async def stop(self):
+        """إيقاف جميع الحلقات بأمان."""
         self.running = False
-        if self.orders_channel:
-            await self.orders_channel.close()
-        if self.tickers_channel:
-            await self.tickers_channel.close()
-
+        logger.info("Stopping WebSocket Manager...")
 # --- [تعديل V9.2] إعادة هيكلة TradeGuardian لدعم البروتوكولات الثلاثة ---
 class TradeGuardian:
+    def __init__(self, application):
+        self.application = application
+        self.protocol_3_states = {}  # [V9.2] حالة الصفقات للبروتوكول 3 (شموع 1m في الذاكرة)
+
+    async def handle_ticker_update(self, ticker_data):
+        # [الحل المقترح] تعديل لاستخدام 'symbol' بدلاً من 'instId' من بيانات ccxt الموحدة
+        async with bot_data.trade_management_lock:
+            symbol = ticker_data['symbol'] 
+            current_price = float(ticker_data['last'])
+            
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
+                    
+                    if not trade:
+                        return
+
+                    trade = dict(trade)
+
+                    # --- [V14.0 Confirmed: التحقق من الأهداف الأساسية أولاً] ---
+                    if current_price >= trade['take_profit']:
+                        await self._close_trade(trade, "ناجحة (TP)", current_price)
+                        return
+                    if current_price <= trade['stop_loss']:
+                        reason = "فاشلة (TSL)" if trade.get('trailing_sl_active') else "فاشلة (SL)"
+                        await self._close_trade(trade, reason, current_price)
+                        return
+                    # --- [نهاية الإصلاح] ---
+
+                    if trade.get('status') == 'force_exit_thesis_invalid':
+                        await self._close_trade(trade, "فاشلة (بطلان الفرضية)", current_price)
+                        return
+
+                    protocol_id = trade.get('management_protocol', 1)
+
+                    highest_price = max(trade.get('highest_price', 0), current_price)
+                    if highest_price > trade.get('highest_price', 0):
+                        await conn.execute("UPDATE trades SET highest_price = ?, highest_price_timestamp = ? WHERE id = ?", (highest_price, time.time(), trade['id']))
+                        await conn.commit()
+                        trade['highest_price'] = highest_price
+
+                    # --- [V9.2] تحديث حالة البروتوكول 3 إذا لزم الأمر ---
+                    if protocol_id == 3:
+                        trade_id = trade['id']
+                        if trade_id not in self.protocol_3_states:
+                            from collections import deque
+                            self.protocol_3_states[trade_id] = {'candles': deque(maxlen=60), 'last_minute': None, 'last_price': 0}
+                        state = self.protocol_3_states[trade_id]
+                        await self._update_1m_candle_state(state, ticker_data)
+
+                    if protocol_id == 1:
+                        pass
+                    elif protocol_id == 2:
+                        await self._execute_dynamic_protocol(trade, current_price)
+                    elif protocol_id == 3:
+                        await self._execute_reflex_protocol(trade, ticker_data)
+
+            except Exception as e:
+                logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+
+    async def _update_1m_candle_state(self, state, ticker_data):
+        """[V9.2] [الحل المقترح] تحديث شمعة 1m في الذاكرة باستخدام بيانات ccxt الموحدة."""
+        # 'timestamp' هو المفتاح الموحد في ccxt (مللي ثانية)
+        ts = ticker_data.get('timestamp')
+        if not ts: return # لا يمكن المتابعة بدون طابع زمني
+
+        current_minute = ts // 60000
+        last = float(ticker_data['last'])
+        # 'lastAmount' هو أقرب حقل موحد لـ 'lastSz', وقد لا يكون متاحًا دائمًا
+        last_sz = float(ticker_data.get('lastAmount', 0))
+
+        if state['last_minute'] is None or current_minute != state['last_minute']:
+            if state['last_minute'] is not None and state['candles']:
+                prev = state['candles'][-1]
+                prev['close'] = state['last_price']
+                prev['volume'] += prev.get('partial_vol', 0)
+                if 'partial_vol' in prev: del prev['partial_vol']
+            
+            new_candle = {
+                'timestamp': ts, 'open': last, 'high': last, 'low': last,
+                'close': 0, 'volume': 0, 'partial_vol': last_sz
+            }
+            state['candles'].append(new_candle)
+            state['last_minute'] = current_minute
+        else:
+            current = state['candles'][-1]
+            current['high'] = max(current['high'], last)
+            current['low'] = min(current['low'], last)
+            current['partial_vol'] = current.get('partial_vol', 0) + last_sz
+        
+        state['last_price'] = last
+
+    async def _execute_classic_protocol(self, trade: dict, current_price: float):
+        pass
+
+    async def _execute_dynamic_protocol(self, trade: dict, current_price: float):
+        symbol = trade['symbol']
+        settings = bot_data.settings
+
+        if trade['id'] in bot_data.trade_update_recommendations:
+            recommendation = bot_data.trade_update_recommendations.pop(trade['id'])
+            new_tp, new_sl, entry_price = recommendation['new_tp'], recommendation['new_sl'], recommendation['entry_price']
+
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET take_profit = ?, stop_loss = ? WHERE id = ?", (new_tp, new_sl, trade['id']))
+                await conn.commit()
+            
+            locked_in_profit_pct = (new_sl / entry_price - 1) * 100 if entry_price > 0 else 0
+            await safe_send_message(self.application.bot,
+                f"🧠 **صعود مؤمّن! | #{trade['id']} {symbol}**\n"
+                f"تم تحقيق الهدف، وبسبب الزخم تم:\n"
+                f"  - **رفع الهدف إلى:** `${new_tp:.4f}`\n"
+                f"  - **تأمين الوقف عند:** `${new_sl:.4f}` (ربح مؤمّن: `~{locked_in_profit_pct:+.2f}%`)")
+            
+            async with aiosqlite.connect(DB_FILE) as conn:
+                conn.row_factory = aiosqlite.Row
+                trade = dict(await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone())
+
+        if settings.get('trailing_sl_enabled', True):
+            if not trade.get('trailing_sl_active', False) and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                new_sl = trade['entry_price'] * 1.001
+                if new_sl > trade['stop_loss']:
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                        await conn.commit()
+                    await safe_send_message(self.application.bot, f"🚀 **تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع الوقف إلى نقطة الدخول: `${new_sl:.4f}`")
+                    trade['trailing_sl_active'] = True
+            
+            if trade.get('trailing_sl_active', False):
+                new_sl_candidate = trade['highest_price'] * (1 - settings['trailing_sl_callback_percent'] / 100)
+                if new_sl_candidate > trade['stop_loss']:
+                    async with aiosqlite.connect(DB_FILE) as conn:
+                        await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl_candidate, trade['id']))
+                        await conn.commit()
+
+        if settings.get('incremental_notifications_enabled', True):
+            last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
+            increment_percent = settings.get('incremental_notification_percent', 2.0)
+            next_notification_target = last_notified_price * (1 + increment_percent / 100)
+            
+            if current_price >= next_notification_target:
+                final_notified_price = last_notified_price
+                while current_price >= next_notification_target:
+                    final_notified_price = next_notification_target
+                    next_notification_target = final_notified_price * (1 + increment_percent / 100)
+                
+                profit_percent = ((current_price / trade['entry_price']) - 1) * 100 if trade['entry_price'] > 0 else 0
+                await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{profit_percent:+.2f}%`")
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (final_notified_price, trade['id']))
+                    await conn.commit()
+
+    async def _execute_reflex_protocol(self, trade: dict, ticker_data: dict):
+        symbol, current_price = trade['symbol'], float(ticker_data['last'])
+        state = self.protocol_3_states.get(trade['id'], {})
+
+        if trade.get('highest_price', 0) > 0 and current_price <= trade['highest_price'] * 0.985:
+            await self._close_trade(trade, "فاشلة (Peak Drawdown)", current_price)
+            return
+
+        if len(state.get('candles', [])) >= 14:
+            df = pd.DataFrame(list(state['candles']))
+            df.ta.rsi(length=14, append=True)
+            rsi_col = find_col(df.columns, "RSI_14")
+
+            if rsi_col and not df[rsi_col].isnull().all():
+                if len(df) >= 2 and (df['low'].iloc[-1] < df['low'].iloc[-2]) and (df[rsi_col].iloc[-1] > df[rsi_col].iloc[-2]):
+                    await self._close_trade(trade, "فاشلة (RSI Divergence)", current_price)
+                    return
+                if current_price < df['low'].iloc[-2]:
+                    await self._close_trade(trade, "فاشلة (Support Breakdown)", current_price)
+                    return
+
+    async def _close_trade(self, trade, reason, close_price):
+        symbol, trade_id = trade['symbol'], trade['id']
+        bot = self.application.bot
+        log_ctx = {'trade_id': trade_id}
+
+        logger.info(f"Guardian: Initiating closure for trade #{trade_id} [{symbol}]. Reason: {reason}", extra=log_ctx)
+
+        if trade_id in self.protocol_3_states:
+            del self.protocol_3_states[trade_id]
+
+        try:
+            base_currency = symbol.split('/')[0]
+            balance = await safe_api_call(lambda: bot_data.exchange.fetch_balance())
+            if not balance:
+                logger.error(f"Closure for #{trade_id} failed: Could not fetch balance.", extra=log_ctx)
+                return
+
+            available_quantity = balance.get(base_currency, {}).get('free', 0.0)
+            if available_quantity <= 0:
+                logger.warning(f"Closure for #{trade_id} skipped: No available balance for {base_currency}.", extra=log_ctx)
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (f"{reason} (No Balance)", close_price, 0.0, trade_id))
+                    await conn.commit()
+                await bot_data.websocket_manager.unsubscribe_tickers([symbol])
+                return
+
+            try:
+                market = bot_data.exchange.market(symbol)
+            except Exception as e:
+                logger.error(f"Closure for #{trade_id} failed: Could not get market data: {e}", extra=log_ctx)
+                return
+
+            min_amount = market.get('limits', {}).get('amount', {}).get('min')
+            if min_amount and available_quantity < min_amount:
+                logger.warning(f"Closure for #{trade_id} failed: Quantity {available_quantity} is less than min amount {min_amount}. Closing as dust.", extra=log_ctx)
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = 'مغلقة (غبار)' WHERE id = ?", (trade_id,))
+                    await conn.commit()
+                await bot_data.websocket_manager.unsubscribe_tickers([symbol])
+                return
+
+            quantity_to_sell = float(bot_data.exchange.amount_to_precision(symbol, available_quantity))
+            await safe_api_call(lambda: bot_data.exchange.create_market_sell_order(symbol, quantity_to_sell))
+
+            pnl = (close_price - trade['entry_price']) * trade['quantity']
+            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade_id))
+                await conn.commit()
+
+            await bot_data.websocket_manager.unsubscribe_tickers([symbol])
+
+            try:
+                start_dt = datetime.fromisoformat(trade['timestamp'])
+                duration = datetime.now(EGYPT_TZ) - start_dt
+                hours, rem = divmod(duration.total_seconds(), 3600)
+                minutes, _ = divmod(rem, 60)
+                duration_str = f"{int(hours)} ساعة و {int(minutes)} دقيقة" if hours > 0 else f"{int(minutes)} دقيقة"
+            except:
+                duration_str = "N/A"
+
+            highest_price_reached = max(trade.get('highest_price', 0), close_price)
+            potential_range = highest_price_reached - trade['stop_loss']
+            achieved_range = close_price - trade['stop_loss']
+            exit_efficiency = max(0, min((achieved_range / potential_range) * 100, 100)) if potential_range > 0 else 0.0
+
+            emoji = "✅" if pnl >= 0 else "🛑"
+            reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in trade['reason'].split(' + ')])
+            msg = (f"{emoji} **ملف المهمة المكتملة**\n\n"
+                   f"▫️ **العملة:** `{symbol}` | **رقم:** `{trade_id}`\n"
+                   f"▫️ **الاستراتيجية:** `{reasons_ar}`\n"
+                   f"▫️ **سبب الإغلاق:** `{reason}`\n"
+                   f"━━━━━━━━━━━━━━━━━━\n"
+                   f"💰 **صافي الربح/الخسارة:** `${pnl:,.2f}` `({pnl_percent:+.2f}%)`\n"
+                   f"⏳ **مدة الصفقة:** `{duration_str}`\n"
+                   f"🔝 **أعلى سعر:** `${format_price(highest_price_reached)}` | **كفاءة الخروج:** `{exit_efficiency:.1f}%`")
+            await safe_send_message(bot, msg)
+
+        except Exception as e:
+            logger.critical(f"CRITICAL: Final closure attempt for #{trade_id} failed unexpectedly: {e}", exc_info=True, extra=log_ctx)
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = 'closure_failed' WHERE id = ?", (trade_id,))
+                await conn.commit()
+            await safe_send_message(bot, f"⚠️ **فشل الإغلاق | #{trade_id} {symbol}**\nسيتم نقل الصفقة إلى الحضانة للمراقبة.")
+
+    async def sync_subscriptions(self):
+        """[V14.0 Updated] مزامنة الاشتراكات مع OptimizedWebSocketManager."""
+        try:
+            async with aiosqlite.connect(DB_FILE) as conn:
+                active_symbols = [row[0] for row in await (await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")).fetchall()]
+            if active_symbols:
+                logger.info(f"Guardian: Syncing initial subscriptions: {active_symbols}")
+                await bot_data.websocket_manager.subscribe_tickers(active_symbols)
+        except Exception as e:
+            logger.error(f"Guardian Sync Error: {e}")
     def __init__(self, application):
         self.application = application
         self.protocol_3_states = {}  # [V9.2] حالة الصفقات للبروتوكول 3 (شموع 1m في الذاكرة)
