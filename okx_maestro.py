@@ -356,14 +356,14 @@ async def init_database():
 
 async def log_pending_trade_to_db(signal, buy_order):
     """
-    [النسخة المصححة V9.2] - تسجل الصفقة المعلقة في قاعدة البيانات مع جميع بيانات الذكاء الاصطناعي والبروتوكول.
+    [النسخة المطورة] - تسجل الصفقة المعلقة في قاعدة البيانات مع جميع بيانات الذكاء الاصطناعي والبروتوكول وحالة السوق.
     """
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            # --- [الإصلاح الحاسم] إضافة الأعمدة المفقودة win_prob و trade_size وبروتوكول ---
+            # --- [التعديل] إضافة العمود الجديد market_regime_entry ---
             await conn.execute("""
-                INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight, win_prob, trade_size, management_protocol, protocol_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO trades (timestamp, symbol, reason, order_id, status, entry_price, take_profit, stop_loss, signal_strength, trade_weight, win_prob, trade_size, management_protocol, protocol_score, market_regime_entry)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (datetime.now(EGYPT_TZ).isoformat(), 
                   signal['symbol'], 
                   signal['reason'], 
@@ -377,7 +377,8 @@ async def log_pending_trade_to_db(signal, buy_order):
                   signal.get('win_prob', 0.5),
                   signal.get('trade_size'),
                   signal.get('management_protocol', 1),
-                  signal.get('protocol_score', 0)
+                  signal.get('protocol_score', 0),
+                  signal.get('market_regime_entry', '') # <-- السطر الجديد الذي تمت إضافته
                  ))
             await conn.commit()
             logger.info(f"Logged pending trade for {signal['symbol']} with order ID {buy_order['id']}.")
