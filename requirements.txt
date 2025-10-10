@@ -10,3 +10,6 @@ websockets
 scipy
 scikit-learn
 aioredis
+transformers
+torch
+orjson
